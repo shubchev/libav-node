@@ -4,6 +4,7 @@ project(libav-node)
 
 add_executable(libav-node
     ${PROJECT_SOURCE_DIR}/src/main.cc
+    ${PROJECT_SOURCE_DIR}/src/av-node.cc
 )
 
 # Libraries to compile
