@@ -4,20 +4,22 @@
 #include <memory>
 #include <vector>
 
-typedef enum {
+enum class AVCmdType : uint8_t {
+  Unknown = 0,
   EncodeFrame,
   DecodeFrame,
   StopService,
 
   Ack,
   Nack,
-} AVCmdType;
+};
 
+#pragma pack(push, 1)
 typedef struct {
-  int width;
-  int height;
-  int fps;
-  int bps;
+  uint32_t bps;
+  uint16_t width;
+  uint16_t height;
+  uint8_t  fps;
 } AVInitInfo;
 
 typedef struct {
@@ -36,6 +38,7 @@ typedef struct {
     AVEncodeInfo dframe;
   };
 } AVCmd;
+#pragma pack(pop)
 
 class IAVEnc;
 typedef std::shared_ptr<IAVEnc> AVEnc;
@@ -45,7 +48,7 @@ public:
 
   static AVEnc create(int width, int height, int framesPerSecond, int bitsPerSecond, int instanceId);
 
-  virtual size_t encode() = 0;
+  virtual size_t encode(const void *frameData, void *packetData) = 0;
 };
 
 
@@ -58,5 +61,5 @@ public:
 
   static AVDec create(int width, int height, int instanceId);
 
-  virtual bool decode(size_t &size) = 0;
+  virtual bool decode(const void *packetData, size_t &packetSize, void *frameData) = 0;
 };

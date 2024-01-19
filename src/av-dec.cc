@@ -1,5 +1,6 @@
 #include <libav_service.h>
 #include <string>
+#include <sstream>
 #include <vector>
 #include <thread>
 
@@ -14,11 +15,6 @@ extern "C" {
 }
 #endif
 
-#include <boost/interprocess/shared_memory_object.hpp>
-#include <boost/interprocess/mapped_region.hpp>
-using namespace boost::interprocess;
-
-
 class AVDecoder : public IAVDec {
 public:
   AVDecoder() {
@@ -31,13 +27,6 @@ public:
   AVCodecContext *ctx = nullptr;
   AVFrame *frame = nullptr;
   AVPacket *pkt = nullptr;
-
-uint8_t *frameData = nullptr;
-  uint8_t *packetData = nullptr;
-
-  shared_memory_object shm;
-  mapped_region frameMapRegion;
-  mapped_region packetMapRegion;
 
   bool init(int width, int height, int instanceId) {
     if (width <= 0 || height <= 0 || (width & 2) || (height % 2)) {
@@ -104,51 +93,17 @@ uint8_t *frameData = nullptr;
       return false;
     }
 
-
-
-    std::stringstream pipeName;
-    pipeName << "avLibService" << instanceId;
-
-    auto name = pipeName.str();
-    shm = shared_memory_object(open_or_create, name.c_str(), read_write);
-
-    offset_t frameSize = width * height * 3;
-    offset_t packetSize = 1000000;
-    shm.truncate(frameSize + packetSize);
-
-    offset_t memSize = 0;
-    shm.get_size(memSize);
-    if (memSize < frameSize + packetSize) {
-      fprintf(stderr, "Could not allocate IPC data\n");
-      deinit();
-      return false;
-    }
-
-    frameMapRegion = mapped_region(shm, read_write, 0, frameSize);
-    packetMapRegion = mapped_region(shm, read_write, frameSize, packetSize);
-
-    frameData = (uint8_t *)frameMapRegion.get_address();
-    packetData = (uint8_t *)packetMapRegion.get_address();
-
-    if (!frameData || !packetData) {
-      fprintf(stderr, "Could not map IPC data\n");
-      deinit();
-      return false;
-    }
-
     return true;
   }
 
   void deinit() {
-    frameData = packetData = nullptr;
-    shared_memory_object::remove(shm.get_name());
     if (parser) av_parser_close(parser); parser = nullptr;
     if (ctx) avcodec_free_context(&ctx); ctx = nullptr;
     if (frame) av_frame_free(&frame); frame = nullptr;
     if (pkt) av_packet_free(&pkt); pkt = nullptr;
   }
 
-  bool decode() {
+  bool decode(void *frameData) {
     int ret = avcodec_send_packet(ctx, pkt);
     if (ret < 0) {
       fprintf(stderr, "Error sending a packet for decoding\n");
@@ -165,7 +120,7 @@ uint8_t *frameData = nullptr;
         return false;
       }
 
-      auto dataPtr = frameData;
+      auto dataPtr = (uint8_t *)frameData;
       int stride = frame->width;
       for (int y = 0; y < ctx->height; y++) {
         memcpy(dataPtr, &frame->data[0][y * frame->linesize[0]], stride);
@@ -184,20 +139,20 @@ uint8_t *frameData = nullptr;
     return true;
   }
 
-  bool decode(size_t &size) override {
-    auto ptr = packetData;
-    while (size > 0) {
-      int ret = av_parser_parse2(parser, ctx, &pkt->data, &pkt->size, ptr, size, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
+  bool decode(const void *packetData, size_t &packetSize, void *frameData) override {
+    auto ptr = (uint8_t *)packetData;
+    while (packetSize > 0) {
+      int ret = av_parser_parse2(parser, ctx, &pkt->data, &pkt->size, ptr, packetSize, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
       if (ret < 0) {
         fprintf(stderr, "Error while parsing\n");
         return false;
       }
 
       ptr  += ret;
-      size -= ret;
+      packetSize -= ret;
 
       if (pkt->size) {
-        return decode();
+        return decode(frameData);
       }
     }
 

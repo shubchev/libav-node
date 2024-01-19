@@ -15,9 +15,10 @@ endif()
 
 add_executable(libav-node
     ${PROJECT_SOURCE_DIR}/include/libav_service.h
-    ${PROJECT_SOURCE_DIR}/src/main.cc
+    ${PROJECT_SOURCE_DIR}/src/ipc-pipe.cc
     ${PROJECT_SOURCE_DIR}/src/av-enc.cc
     ${PROJECT_SOURCE_DIR}/src/av-dec.cc
+    ${PROJECT_SOURCE_DIR}/src/main.cc
 )
 
 # Library Paths
@@ -27,9 +28,17 @@ target_link_directories (libav-node PRIVATE
 )
 
 # Libraries to compile
+if (WIN32)
+
+else()
+set(ADDITIONAL_LIBS pthread rt)
+endif()
+
 target_link_libraries (libav-node PRIVATE
     avcodec
     avutil
+    avformat
+    ${ADDITIONAL_LIBS}
 )
 
 # Include Paths

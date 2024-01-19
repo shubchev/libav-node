@@ -3,129 +3,94 @@
 #include <string>
 #include <sstream>
 #include <thread>
-#include <Windows.h>
+#include "ipc-pipe.h"
+
+#ifdef WIN32
+  #include <Windows.h>
+#else
+  #include <errno.h>
+  #include <spawn.h>
+  #include <stdint.h>
+  #include <stdio.h>
+  #include <stdlib.h>
+  #include <string.h>
+  #include <unistd.h>
+  #include <wait.h>
+#endif
 
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 using namespace boost::interprocess;
 
-#define PIPE_BUFFER_SIZE 1024
+#define MESSAGE_BUFFER_SIZE (100 * 1024)
+#define PIPE_BUFFER_SIZE (32 * 1024 * 1024)
+
 const char *appPath = nullptr;
 
-shared_memory_object shm;
-mapped_region frameMapRegion;
-mapped_region packetMapRegion;
-uint8_t *frameData = nullptr;
-uint8_t *packetData = nullptr;
 
-HANDLE createPipe(int instanceId) {
-  std::string memName = "avLibService" + std::to_string(instanceId);
-  std::string pipeName = "\\\\.\\pipe\\" + memName;
+bool startProccess(const std::string &path, const std::vector<std::string> &params) {
+#ifdef WIN32
+  std::stringstream ss;
+  for (auto &p : params) ss << p << " ";
+  ShellExecute(NULL, "open", path.c_str(), ss.str().c_str(), NULL, SW_SHOW);
+  return true;
+#else
+  pid_t child_pid;
+  int s;
 
-  auto hPipe = CreateNamedPipe(pipeName.c_str(),
-                               PIPE_ACCESS_DUPLEX,
-                               PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_REJECT_REMOTE_CLIENTS,
-                               1, PIPE_BUFFER_SIZE, PIPE_BUFFER_SIZE, 0, NULL);
-  if (hPipe == INVALID_HANDLE_VALUE) {
-    return hPipe;
+  /* Spawn the child. The name of the program to execute and the
+    command-line arguments are taken from the command-line arguments
+    of this program. The environment of the program execed in the
+    child is made the same as the parent's environment. */
+  std::vector<const char *> argv;
+  argv.push_back(path.c_str());
+  for (auto &p : params) argv.push_back(p.c_str());
+  argv.push_back(0);
+
+  s = posix_spawnp(&child_pid, path.c_str(), NULL, NULL, (char *const *)argv.data(), environ);
+  if (s != 0) {
+    return false;
   }
 
-  return hPipe;
-}
-
-HANDLE openPipe(int instanceId, offset_t frameSize, offset_t packetSize) {
-  std::string memName = "avLibService" + std::to_string(instanceId);
-  std::string pipeName = "\\\\.\\pipe\\" + memName;
-
-  HANDLE hPipe = INVALID_HANDLE_VALUE;
-  while (1) {
-    hPipe = CreateFile(pipeName.c_str(), GENERIC_WRITE | GENERIC_READ, 0, NULL, OPEN_EXISTING, 0, NULL);
-    if (hPipe != INVALID_HANDLE_VALUE) {
-      break;
-    }
-
-    if (GetLastError() != ERROR_PIPE_BUSY) {
-      return INVALID_HANDLE_VALUE;
-    }
- 
-    if (!WaitNamedPipe(pipeName.c_str(), 5000)) {
-      return INVALID_HANDLE_VALUE;
-    }
-  }
-
-  shm = shared_memory_object(open_only, memName.c_str(), read_write);
-
-  frameMapRegion = mapped_region(shm, read_write, 0, frameSize);
-  packetMapRegion = mapped_region(shm, read_write, frameSize, packetSize);
-
-  frameData  = (uint8_t *)frameMapRegion.get_address();
-  packetData = (uint8_t *)packetMapRegion.get_address();
-
-  if (!frameData || !packetData) {
-    CloseHandle(hPipe);
-    return INVALID_HANDLE_VALUE;
-  }
-
-  return hPipe;
-}
-
-bool writePipe(HANDLE pipe, const void *data, size_t size) {
-  if (!data || !size) return false;
-  auto ptr = (const uint8_t *)data;
-  DWORD bytesWritten = 0;
-  int retry = 100;
-  while (bytesWritten < size && retry > 0) {
-    DWORD bytesSent = 0;
-    if (!WriteFile(pipe, &ptr[bytesWritten], size - bytesWritten, &bytesSent, NULL)) {
-      retry--;
-    } else {
-      bytesWritten += bytesSent;
-    }
-  }
-  return bytesWritten == size;
-}
-
-bool readPipe(HANDLE pipe, void *data, size_t size) {
-  if (!data || !size) return false;
-  auto ptr = (uint8_t *)data;
-  DWORD bytesRead = 0;
-  int retry = 100;
-  while (bytesRead < size && retry > 0) {
-    DWORD bytesRecv = 0;
-    //if (!ReadFile(hPipeRead, &ptr[bytesRead], size - bytesRead, &bytesRecv, NULL)) {
-    if (!ReadFile(pipe, &ptr[bytesRead], size - bytesRead, &bytesRecv, NULL)) {
-      retry--;
-    } else {
-      bytesRead += bytesRecv;
-    }
-  }
-  return bytesRead == size;
+  printf("PID of child: %jd\n", (intmax_t) child_pid);
+  return true;
+#endif
 }
 
 
 
-
-HANDLE openService(bool isEnc, int width, int height, int fps, int bps, int instanceId) {
-  std::stringstream params;
+IPCPipe openService(bool isEnc, int width, int height, int fps, int bps, int instanceId) {
+  std::vector<std::string> params;
   if (isEnc) {
-    params << "enc " << instanceId << " " << width << " " << height << " " << fps << " " << bps;
+    params.push_back("enc");
+    params.push_back(std::to_string(instanceId));
+    params.push_back(std::to_string(width));
+    params.push_back(std::to_string(height));
+    params.push_back(std::to_string(fps));
+    params.push_back(std::to_string(bps));
   } else {
-    params << "dec " << instanceId << " " << width << " " << height;
+    params.push_back("dec");
+    params.push_back(std::to_string(instanceId));
+    params.push_back(std::to_string(width));
+    params.push_back(std::to_string(height));
   }
-  ShellExecute(NULL, "open", appPath, params.str().c_str(), NULL, SW_SHOW);
+  startProccess(appPath, params);
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-  return openPipe(instanceId, width * height * 3, 1000000);
+  auto pipe = IIPCPipe::open("avLibService" + std::to_string(instanceId), MESSAGE_BUFFER_SIZE, PIPE_BUFFER_SIZE);
+  std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+
+  return pipe;
 }
 
-int closeService(HANDLE pipe) {
+int closeService(IPCPipe pipe) {
   AVCmd cmd;
   cmd.type = AVCmdType::StopService;
-  if (!writePipe(pipe, &cmd, sizeof(cmd))) {
+  if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
     printf("Failed to send stop command\n");
     return 3;
   }
-  readPipe(pipe, &cmd, sizeof(cmd));
+  pipe->read(&cmd, sizeof(cmd));
   if (cmd.type != AVCmdType::Ack) {
     printf("Stop command got response: %d\n", (int)cmd.type);
     return 3;
@@ -145,11 +110,14 @@ int runEncodeTest(const char *appPath) {
   int width  = 1920;
   int height = 1080;
   auto pipe = openService(true, width, height, 30, 5000000, 1);
-  if (pipe == INVALID_HANDLE_VALUE) {
+  if (!pipe) {
+    printf("Failed to open service\n");
     fclose(dumpFile);
     return 3;
   }
 
+  auto frameData = (uint8_t *)pipe->getBuffer(0, width * height * 3);
+  auto packetData = (uint8_t *)pipe->getBuffer(width * height * 3, 1024 * 1024);
 
   AVCmd cmd;
   for (int i = 0; i < 120; i++) {
@@ -173,15 +141,16 @@ int runEncodeTest(const char *appPath) {
       }
     }
 
-
     auto startTs1 = std::chrono::system_clock::now();
 
     cmd.type = AVCmdType::EncodeFrame;
     cmd.eframe.size = width * height * 3 / 2;
-    if (!writePipe(pipe, &cmd, sizeof(cmd))) {
+    if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
       printf("Failed to send encode command %d\n", i);
     }
-    readPipe(pipe, &cmd, sizeof(cmd));
+    if (pipe->read(&cmd, sizeof(cmd)) != sizeof(cmd)) {
+      printf("Failed to get encode response %d\n", i);
+    }
     if (cmd.type != AVCmdType::Ack) {
       printf("Encode command got response: %d\n", (int)cmd.type);
     }
@@ -211,10 +180,13 @@ int runDecodeTest(const char *appPath) {
   int width  = 1920;
   int height = 1080;
   auto pipe = openService(false, width, height, 0, 0, 1);
-  if (pipe == INVALID_HANDLE_VALUE) {
+  if (!pipe) {
     fclose(dumpFile);
     return 3;
   }
+
+  auto packetData = (uint8_t *)pipe->getBuffer(0, 1024 * 1024);
+  auto frameData = (uint8_t *)pipe->getBuffer(1024 * 1024, width * height * 3);
 
   AVCmd cmd;
   cmd.dframe.size = 0;
@@ -226,10 +198,10 @@ int runDecodeTest(const char *appPath) {
     lastRead = cmd.dframe.size;
     cmd.type = AVCmdType::DecodeFrame;
     if (cmd.dframe.size) {
-      if (!writePipe(pipe, &cmd, sizeof(cmd))) {
+      if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
         printf("Failed to send decode command\n");
       }
-      readPipe(pipe, &cmd, sizeof(cmd));
+      pipe->read(&cmd, sizeof(cmd));
     }
 
     if (cmd.type == AVCmdType::Ack) {
@@ -278,19 +250,21 @@ int main(int argc, char **argv) {
       return 2;
     }
 
-    auto pipe = createPipe(instanceId);
-    if (pipe == INVALID_HANDLE_VALUE) {
+    auto pipe = IIPCPipe::create("avLibService" + std::to_string(instanceId), MESSAGE_BUFFER_SIZE, PIPE_BUFFER_SIZE);
+    if (!pipe) {
       return 3;
     }
 
+    auto frameData = pipe->getBuffer(0, width * height * 3);
+    auto packetData = pipe->getBuffer(width * height * 3, 1024 * 1024);
+
+    AVCmd cmd;
     auto lastKeepAlive = std::chrono::system_clock::now();
     while (enc) {
       auto keepAliveDur = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - lastKeepAlive);
       if (keepAliveDur.count() > 10) break;
 
-      AVCmd cmd;
-      if (!readPipe(pipe, &cmd, sizeof(cmd))) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      if (pipe->read(&cmd, sizeof(cmd), 200) != sizeof(cmd)) {
         continue;
       }
       lastKeepAlive = std::chrono::system_clock::now();
@@ -302,7 +276,7 @@ int main(int argc, char **argv) {
           break;
         }
         case AVCmdType::EncodeFrame: {
-          cmd.eframe.size = enc->encode();
+          cmd.eframe.size = enc->encode(frameData, packetData);
           cmd.type = AVCmdType::Ack;
           break;
         }
@@ -311,9 +285,9 @@ int main(int argc, char **argv) {
           break;
         }
       }
-      writePipe(pipe, &cmd, sizeof(cmd));
+      pipe->write(&cmd, sizeof(cmd));
     }
-    CloseHandle(pipe);
+    pipe = nullptr;
 
   } else if (!strcmp(argv[1], "dec")) {
     if (argc < 5) {
@@ -329,19 +303,21 @@ int main(int argc, char **argv) {
       return 2;
     }
 
-    auto pipe = createPipe(instanceId);
-    if (pipe == INVALID_HANDLE_VALUE) {
+    auto pipe = IIPCPipe::create("avLibService" + std::to_string(instanceId), MESSAGE_BUFFER_SIZE, PIPE_BUFFER_SIZE);
+    if (!pipe) {
       return 3;
     }
+
+    auto packetData = pipe->getBuffer(0, 1024 * 1024);
+    auto frameData = pipe->getBuffer(1024 * 1024, width * height * 3);
 
     auto lastKeepAlive = std::chrono::system_clock::now();
     while (dec) {
       auto keepAliveDur = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - lastKeepAlive);
-      //if (keepAliveDur.count() > 10) break;
+      if (keepAliveDur.count() > 10) break;
 
       AVCmd cmd;
-      if (!readPipe(pipe, &cmd, sizeof(cmd))) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+      if (pipe->read(&cmd, sizeof(cmd), 200) != sizeof(cmd)) {
         continue;
       }
       lastKeepAlive = std::chrono::system_clock::now();
@@ -353,7 +329,7 @@ int main(int argc, char **argv) {
           break;
         }
         case AVCmdType::DecodeFrame: {
-          if (dec->decode(cmd.eframe.size)) cmd.type = AVCmdType::Ack;
+          if (dec->decode(packetData, cmd.eframe.size, frameData)) cmd.type = AVCmdType::Ack;
           else cmd.type = AVCmdType::Nack;
           break;
         }
@@ -362,15 +338,15 @@ int main(int argc, char **argv) {
           break;
         }
       }
-      writePipe(pipe, &cmd, sizeof(cmd));
+      pipe->write(&cmd, sizeof(cmd));
     }
-    CloseHandle(pipe);
+    pipe = nullptr;
   } else if (!strcmp(argv[1], "test")) {
-    /*printf("Starting encode test\n");
+    printf("Starting encode test\n");
     int ret = runEncodeTest(argv[0]);
     if (ret) return ret;
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(4000));*/
+    std::this_thread::sleep_for(std::chrono::milliseconds(4000));
     printf("Starting decode test\n");
     return runDecodeTest(argv[0]);
   }
