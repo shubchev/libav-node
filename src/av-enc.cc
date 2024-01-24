@@ -1,4 +1,4 @@
-#include <libav_service.h>
+#include "av.h"
 #include <string>
 #include <sstream>
 #include <vector>
@@ -30,79 +30,57 @@ public:
 
   int frameIdx = 0;
 
-  bool init(int width, int height, int bps, int fps, int instanceId) {
+  bool init(const std::string &name, int width, int height, int bps, int fps) {
     int ret;
     if (width <= 0 || height <= 0 || (width & 2) || (height % 2) || bps < 1000000 || fps < 1) {
       return false;
     }
 
-
-    std::vector<const AVCodec *> codecs;
-    const AVCodec *codec = NULL;
-    void *iter = NULL;
-    while (codec = av_codec_iterate(&iter)) {
-      if (!av_codec_is_encoder(codec)) continue;
-      if (strstr(codec->name, "hevc") || strstr(codec->name, "h265") ||
-          strstr(codec->name, "avc") || strstr(codec->name, "h264")) {
-        codecs.push_back(codec);
-      }
-    }
-
-    for (auto &c : codecs) printf("Encoder: %s\n", c->name);
-
-    for (auto &c : codecs) {
-      codec = avcodec_find_encoder_by_name(c->name);
-      if (!codec) {
-        fprintf(stderr, "Could not find video codec\n");
-        continue;
-      }
-
-      ctx = avcodec_alloc_context3(codec);
-      if (!ctx) {
-        fprintf(stderr, "Could not allocate video encoder context\n");
-        continue;
-      }
-
-      ctx->bit_rate = bps;
-      /* resolution must be a multiple of two */
-      ctx->width = width;
-      ctx->height = height;
-
-      /* frames per second */
-      ctx->time_base = { 1, fps };
-      ctx->framerate = { fps, 1 };
-
-      /* emit one intra frame every ten frames
-      * check frame pict_type before passing frame
-      * to encoder, if frame->pict_type is AV_PICTURE_TYPE_I
-      * then gop_size is ignored and the output of encoder
-      * will always be I frame irrespective to gop_size
-      */
-      ctx->gop_size = 10;
-      ctx->max_b_frames = 1;
-      ctx->pix_fmt = AV_PIX_FMT_YUV420P;
-
-      ctx->opaque = this;
-
-      if (codec->id == AV_CODEC_ID_H264) {
-        av_opt_set(ctx->priv_data, "preset", "slow", 0);
-      }
-
-      char errstr[256];
-      ret = avcodec_open2(ctx, codec, NULL);
-      if (ret < 0) {
-        fprintf(stderr, "Could not open codec '%s': %s\n", c->name, av_make_error_string(errstr, sizeof(errstr), ret));
-        if (ctx) avcodec_free_context(&ctx);
-        ctx = nullptr;
-        continue;
-      }
-      printf("Codec opened: %s\n", c->name);
-      break;
-    }
-    if (!ctx) {
+    auto codec = avcodec_find_encoder_by_name(name.c_str());
+    if (!codec) {
+      fprintf(stderr, "Could not find video codec: %s\n", name.c_str());
       return false;
     }
 
+    ctx = avcodec_alloc_context3(codec);
+    if (!ctx) {
+      fprintf(stderr, "Could not allocate video encoder context\n");
+      return false;
+    }
+
+    ctx->bit_rate = bps;
+    /* resolution must be a multiple of two */
+    ctx->width = width;
+    ctx->height = height;
+
+    /* frames per second */
+    ctx->time_base = { 1, fps };
+    ctx->framerate = { fps, 1 };
+
+    /* emit one intra frame every ten frames
+    * check frame pict_type before passing frame
+    * to encoder, if frame->pict_type is AV_PICTURE_TYPE_I
+    * then gop_size is ignored and the output of encoder
+    * will always be I frame irrespective to gop_size
+    */
+    ctx->gop_size = 10;
+    ctx->max_b_frames = 1;
+    ctx->pix_fmt = AV_PIX_FMT_YUV420P;
+
+    ctx->opaque = this;
+
+    if (codec->id == AV_CODEC_ID_H264) {
+      av_opt_set(ctx->priv_data, "preset", "slow", 0);
+    }
+
+    char errstr[256];
+    ret = avcodec_open2(ctx, codec, NULL);
+    if (ret < 0) {
+      fprintf(stderr, "Could not open codec '%s': %s\n", codec->name, av_make_error_string(errstr, sizeof(errstr), ret));
+      if (ctx) avcodec_free_context(&ctx);
+      ctx = nullptr;
+      return false;
+    }
 
     pkt = av_packet_alloc();
     if (!pkt) {
@@ -128,6 +106,9 @@ public:
       return false;
     }
 
+    codecName = name;
+    printf("Encoder opened: %s\n", codec->name);
+
     return true;
   }
 
@@ -137,7 +118,8 @@ public:
     if (pkt) av_packet_free(&pkt); pkt = nullptr;
   }
 
-  size_t encode(const void *frameData, void *packetData) override {
+  bool process(uint8_t *frameData, uint8_t *packetData, size_t &packetSize) override {
+    packetSize = 0;
     if (frameData) {
       auto dataPtr = (uint8_t *)frameData;
       int stride = frame->width;
@@ -162,42 +144,55 @@ public:
     else ret = avcodec_send_frame(ctx, 0);
     if (ret < 0) {
       fprintf(stderr, "Error sending a frame for encoding\n");
-      return 0;
+      return false;
     }
 
-    size_t encSize = 0;
     while (ret >= 0) {
       ret = avcodec_receive_packet(ctx, pkt);
       if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-        if (ret == AVERROR_EOF) return 0;
+        if (ret == AVERROR_EOF) return false;
         continue;
       } else if (ret < 0) {
         fprintf(stderr, "Error during encoding\n");
-        return 0;
+        return false;
       }
 
       if (packetData) {
-        encSize = pkt->size;
-        memcpy(packetData, pkt->data, encSize);
+        packetSize = pkt->size;
+        memcpy(packetData, pkt->data, pkt->size);
       }
 
       av_packet_unref(pkt);
     }
 
-    return encSize;
+    return true;
   }
+
+  bool isEncoder() const override { return true; }
 
 };
 
+std::vector<std::string> IAVEnc::getEncoders() {
+  std::vector<std::string> codecs;
+  const AVCodec *codec = NULL;
+  void *iter = NULL;
+  while (codec = av_codec_iterate(&iter)) {
+    if (!av_codec_is_encoder(codec)) continue;
+    if (strstr(codec->name, "hevc") || strstr(codec->name, "h265") ||
+        strstr(codec->name, "avc") || strstr(codec->name, "h264")) {
+      codecs.push_back(codec->name);
+    }
+  }
+  return codecs;
+}
 
-
-AVEnc IAVEnc::create(int width, int height, int fps, int bps, int instanceId) {
+AVEnc IAVEnc::createEncoder(const std::string &name, int width, int height, int fps, int bps) {
   auto enc = std::make_shared<AVEncoder>();
   if (!enc) {
     return nullptr;
   }
 
-  if (!enc->init(width, height, bps, fps, instanceId)) {
+  if (!enc->init(name, width, height, bps, fps)) {
     return nullptr;
   }
 

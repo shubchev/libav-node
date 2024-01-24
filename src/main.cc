@@ -1,4 +1,5 @@
 #include "libav_service.h"
+#include "av.h"
 #include <chrono>
 #include <string>
 #include <sstream>
@@ -21,9 +22,6 @@
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 using namespace boost::interprocess;
-
-#define MESSAGE_BUFFER_SIZE (100 * 1024)
-#define PIPE_BUFFER_SIZE (32 * 1024 * 1024)
 
 const char *appPath = nullptr;
 
@@ -59,21 +57,8 @@ bool startProccess(const std::string &path, const std::vector<std::string> &para
 
 
 
-IPCPipe openService(bool isEnc, int width, int height, int fps, int bps, int instanceId) {
-  std::vector<std::string> params;
-  if (isEnc) {
-    params.push_back("enc");
-    params.push_back(std::to_string(instanceId));
-    params.push_back(std::to_string(width));
-    params.push_back(std::to_string(height));
-    params.push_back(std::to_string(fps));
-    params.push_back(std::to_string(bps));
-  } else {
-    params.push_back("dec");
-    params.push_back(std::to_string(instanceId));
-    params.push_back(std::to_string(width));
-    params.push_back(std::to_string(height));
-  }
+IPCPipe openService(int instanceId) {
+  std::vector<std::string> params = { std::to_string(instanceId) };
   startProccess(appPath, params);
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
@@ -109,17 +94,38 @@ int runEncodeTest(const char *appPath) {
 
   int width  = 1920;
   int height = 1080;
-  auto pipe = openService(true, width, height, 30, 5000000, 1);
+  int fps = 30;
+  int bps = 5000000;
+  auto pipe = openService(1);
   if (!pipe) {
     printf("Failed to open service\n");
     fclose(dumpFile);
     return 3;
   }
 
-  auto frameData = (uint8_t *)pipe->getBuffer(0, width * height * 3);
-  auto packetData = (uint8_t *)pipe->getBuffer(width * height * 3, 1024 * 1024);
+  int bufferSize = 3 * width * height;
+  int nBuffers = PIPE_BUFFER_SIZE / bufferSize;
+  auto packetData = (uint8_t *)pipe->getBuffer(             0,              bufferSize);
+  auto frameData  = (uint8_t *)pipe->getBuffer(bufferSize, (nBuffers - 1) * bufferSize);
 
   AVCmd cmd;
+  cmd.type = AVCmdType::OpenEncoder;
+  cmd.init.width    = width;
+  cmd.init.height   = height;
+  cmd.init.fps      = fps;
+  cmd.init.bps      = bps;
+  strcpy(cmd.init.codecName, "hevc_nvenc");
+  if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
+    printf("Enc service init failed\n");
+    return 3;
+  }
+
+  pipe->read(&cmd, sizeof(cmd));
+  if (cmd.type != AVCmdType::Ack) {
+    printf("Enc service init failed\n");
+    return 3;
+  }
+
   for (int i = 0; i < 120; i++) {
     auto startTs = std::chrono::system_clock::now();
 
@@ -143,24 +149,23 @@ int runEncodeTest(const char *appPath) {
 
     auto startTs1 = std::chrono::system_clock::now();
 
-    cmd.type = AVCmdType::EncodeFrame;
-    cmd.eframe.size = width * height * 3 / 2;
-    if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
-      printf("Failed to send encode command %d\n", i);
-    }
-    if (pipe->read(&cmd, sizeof(cmd)) != sizeof(cmd)) {
-      printf("Failed to get encode response %d\n", i);
-    }
+    cmd.type = AVCmdType::Process;
+    cmd.info.size = width * height * 3 / 2;
+    cmd.info.bufferIndex = 0;
+    pipe->write(&cmd, sizeof(cmd));
+    pipe->read(&cmd, sizeof(cmd));
     if (cmd.type != AVCmdType::Ack) {
       printf("Encode command got response: %d\n", (int)cmd.type);
     }
-    auto endTs = std::chrono::system_clock::now();
-    printf("Time for preprocess: %0.3f s\nTime for encode: %0.3f s\n",
-            std::chrono::duration<float>(startTs1 - startTs).count(),
-            std::chrono::duration<float>(endTs - startTs1).count());
 
-    if (cmd.eframe.size) {
-      fwrite(packetData, 1, cmd.eframe.size, dumpFile);
+    auto endTs = std::chrono::system_clock::now();
+    printf("Time for preprocess: %0.3f s, Time for encode: %0.3f s, Packet size = %d\n",
+            std::chrono::duration<float>(startTs1 - startTs).count(),
+            std::chrono::duration<float>(endTs - startTs1).count(),
+            (int)cmd.info.size);
+
+    if (cmd.info.size) {
+      fwrite(packetData, 1, cmd.info.size, dumpFile);
     }
   }
 
@@ -179,40 +184,85 @@ int runDecodeTest(const char *appPath) {
 
   int width  = 1920;
   int height = 1080;
-  auto pipe = openService(false, width, height, 0, 0, 1);
+  auto pipe = openService(1);
   if (!pipe) {
     fclose(dumpFile);
     return 3;
   }
 
-  auto packetData = (uint8_t *)pipe->getBuffer(0, 1024 * 1024);
-  auto frameData = (uint8_t *)pipe->getBuffer(1024 * 1024, width * height * 3);
+  int bufferSize = 3 * width * height;
+  int nBuffers = PIPE_BUFFER_SIZE / bufferSize;
+  auto packetData = (uint8_t *)pipe->getBuffer(             0,              bufferSize);
+  auto frameData  = (uint8_t *)pipe->getBuffer(bufferSize, (nBuffers - 1) * bufferSize);
 
   AVCmd cmd;
-  cmd.dframe.size = 0;
-  size_t lastRead;
+  cmd.type = AVCmdType::OpenDecoder;
+  cmd.init.width    = width;
+  cmd.init.height   = height;
+  strcpy(cmd.init.codecName, "hevc");
+  if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
+    printf("Enc service init failed\n");
+    return 3;
+  }
+
+  pipe->read(&cmd, sizeof(cmd));
+  if (cmd.type != AVCmdType::Ack) {
+    printf("Enc service init failed\n");
+    return 3;
+  }
+
+
+  size_t lastRead, remainingBytes = 0;
   int frameId = 0;
   while (!feof(dumpFile)) {
-    if (cmd.dframe.size) memmove(packetData, &packetData[lastRead - cmd.dframe.size], cmd.dframe.size);
-    cmd.dframe.size += fread(&packetData[cmd.dframe.size], 1, 16 * 1024 - cmd.dframe.size, dumpFile);
-    lastRead = cmd.dframe.size;
-    cmd.type = AVCmdType::DecodeFrame;
-    if (cmd.dframe.size) {
+    if (remainingBytes) memmove(packetData, &packetData[lastRead - remainingBytes], remainingBytes);
+    remainingBytes += fread(&packetData[remainingBytes], 1, 16 * 1024 - remainingBytes, dumpFile);
+    lastRead = remainingBytes;
+    cmd.type = AVCmdType::Process;
+    if (remainingBytes) {
+      cmd.info.size = remainingBytes;
       if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
         printf("Failed to send decode command\n");
       }
       pipe->read(&cmd, sizeof(cmd));
+      remainingBytes = cmd.info.size;
     }
 
+    while (1) {
+      cmd.type = AVCmdType::HasFrame;
+      if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
+        printf("Failed to send frame check command\n");
+        break;
+      }
+      pipe->read(&cmd, sizeof(cmd));
+      if (cmd.type == AVCmdType::Ack) {
+        std::string name = std::string("frame") + std::to_string(frameId++) + ".raw";
+        FILE *fp = fopen(name.c_str(), "wb");
+        fwrite(&frameData[cmd.info.bufferIndex * 3 * width * height], 1, width * height * 3, fp);
+        fclose(fp);
+      } else {
+        break;
+      }
+    }
+    printf("Decode resp %d %d %d %d\n", (int)cmd.type, (int)remainingBytes, (int)lastRead, (int)frameId);  
+  }
+  fclose(dumpFile);
+  while (1) {
+    cmd.type = AVCmdType::Flush;
+    if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
+      printf("Failed to send flush command\n");
+      break;
+    }
+    pipe->read(&cmd, sizeof(cmd));
     if (cmd.type == AVCmdType::Ack) {
       std::string name = std::string("frame") + std::to_string(frameId++) + ".raw";
       FILE *fp = fopen(name.c_str(), "wb");
-      fwrite(frameData, 1, width * height * 3, fp);
+      fwrite(&frameData[cmd.info.bufferIndex * 3 * width * height], 1, width * height * 3, fp);
       fclose(fp);
+    } else {
+      break;
     }
-      printf("Decode resp %d %d %d %d\n", (int)cmd.type, cmd.dframe.size, lastRead, frameId);
   }
-  fclose(dumpFile);
 
   return closeService(pipe);
 }
@@ -222,9 +272,7 @@ void printUsage(const char *appPath) {
   auto tmp = pn;
   while (tmp = strstr(tmp + 1, "\\")) pn = tmp + 1;
   printf("Insufficient arguments.\n"
-          "  Usage: %s [test |"
-                      "enc <instanceId> <width> <height> <fps> <bps> |"
-                      "dec <instanceId> <width> <height>\n", pn);
+          "  Usage: %s [test | <instanceId>]\n", pn);
 }
 
 int main(int argc, char **argv) {
@@ -234,20 +282,16 @@ int main(int argc, char **argv) {
     return 1;
   }
 
-  if (!strcmp(argv[1], "enc")) {
-    if (argc < 7) {
-      printUsage(argv[0]);
-      return 1;
-    }
-    int instanceId  = atoi(argv[2]);
-    int width       = atoi(argv[3]);
-    int height      = atoi(argv[4]);
-    int fps         = atoi(argv[5]);
-    int bps         = atoi(argv[6]);
+  bool isTest = !strcmp(argv[1], "test");
+  if (!isTest) {
+    AVEnc enc;
+    int width, height, fps, bps;
+    int readBuffer = 0, writeBuffer = 0;
 
-    auto enc = IAVEnc::create(width, height, fps, bps, instanceId);
-    if (!enc) {
-      return 2;
+    int instanceId = -1;
+    if (sscanf(argv[1], "%d", &instanceId) != 1 || instanceId < 0) {
+      printf("Invalid instance id: %s\n", argv[1]);
+      return 1;
     }
 
     auto pipe = IIPCPipe::create("avLibService" + std::to_string(instanceId), MESSAGE_BUFFER_SIZE, PIPE_BUFFER_SIZE);
@@ -255,12 +299,28 @@ int main(int argc, char **argv) {
       return 3;
     }
 
-    auto frameData = pipe->getBuffer(0, width * height * 3);
-    auto packetData = pipe->getBuffer(width * height * 3, 1024 * 1024);
+    printf("Starting libav-node service, session id %d\n", instanceId);
+
+    auto encoders = IAVEnc::getEncoders();
+    auto decoders = IAVEnc::getDecoders();
+    printf("Encoders\t|\tDecoders\n");
+    for (size_t i = 0; i < std::max(encoders.size(), decoders.size()); i++) {
+      if (i < encoders.size()) printf("%s\t|\t", encoders[i].c_str());
+      else printf("\t\t|\t");
+      if (i < decoders.size()) printf("%s\n", decoders[i].c_str());
+      else printf("\t\n");
+    }
+
+
+    int bufferSize = 0, nBuffers = 0;
+    uint8_t *packetData = nullptr, *frameData = nullptr;
 
     AVCmd cmd;
+    cmd.type = AVCmdType::Ack;
+
     auto lastKeepAlive = std::chrono::system_clock::now();
-    while (enc) {
+    bool stopService = false;
+    while (1) {
       auto keepAliveDur = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - lastKeepAlive);
       if (keepAliveDur.count() > 10) break;
 
@@ -270,78 +330,122 @@ int main(int argc, char **argv) {
       lastKeepAlive = std::chrono::system_clock::now();
 
       switch (cmd.type) {
+        case AVCmdType::GetEncoderCount: {
+          cmd.type = AVCmdType::Ack;
+          cmd.info.size = encoders.size();
+          break;
+        }
+        case AVCmdType::GetEncoderName: {
+          if (cmd.info.bufferIndex < encoders.size()) {
+            cmd.type = AVCmdType::Ack;
+            snprintf(cmd.init.codecName, sizeof(cmd.init.codecName), "%s", encoders[cmd.info.bufferIndex].c_str());
+          } else cmd.type = AVCmdType::Nack;
+          break;
+        }
+        case AVCmdType::GetDecoderCount: {
+          cmd.type = AVCmdType::Ack;
+          cmd.info.size = decoders.size();
+          break;
+        }
+        case AVCmdType::GetDecoderName: {
+          if (cmd.info.bufferIndex < decoders.size()) {
+            cmd.type = AVCmdType::Ack;
+            snprintf(cmd.init.codecName, sizeof(cmd.init.codecName), "%s", decoders[cmd.info.bufferIndex].c_str());
+          } else cmd.type = AVCmdType::Nack;
+          break;
+        }
+        case AVCmdType::OpenEncoder:
+        case AVCmdType::OpenDecoder: {
+          bufferSize = 3 * cmd.init.width * cmd.init.height;
+          nBuffers = PIPE_BUFFER_SIZE / bufferSize;
+          if (nBuffers < 2) {
+            cmd.type = AVCmdType::Nack;
+            break;
+          }
+
+          std::string codecName;
+          if (cmd.type == AVCmdType::OpenDecoder) {
+            for (auto &c : decoders) if (c.find(cmd.init.codecName) == 0) { codecName = c; break; }
+          } else {
+            for (auto &c : encoders) if (c.find(cmd.init.codecName) == 0) { codecName = c; break; }
+          }
+
+          writeBuffer = readBuffer = 0;
+          packetData = (uint8_t *)pipe->getBuffer(             0,              bufferSize);
+          frameData  = (uint8_t *)pipe->getBuffer(bufferSize, (nBuffers - 1) * bufferSize);
+
+          if (cmd.type == AVCmdType::OpenDecoder) enc = IAVEnc::createDecoder(codecName, cmd.init.width, cmd.init.height);
+          else enc = IAVEnc::createEncoder(codecName, cmd.init.width, cmd.init.height, cmd.init.fps, cmd.init.bps);
+          if (enc) {
+            cmd.type = AVCmdType::Ack;
+            width = cmd.init.width;
+            height = cmd.init.height;
+          } else {
+            cmd.type = AVCmdType::Nack;
+            width = height = 0;
+            packetData = frameData = nullptr;
+          }
+          break;
+        }
+        case AVCmdType::Close: {
+          enc = nullptr;
+          break;
+        }
+        case AVCmdType::Process: {
+          bool ret;
+          if (enc->isEncoder()) ret = enc->process(&frameData[cmd.info.bufferIndex * bufferSize], packetData, cmd.info.size);
+          else ret = enc->process(&frameData[writeBuffer * bufferSize], packetData, cmd.info.size);
+          if (ret) {
+            cmd.type = AVCmdType::Ack;
+            if (!enc->isEncoder()) writeBuffer = (writeBuffer + 1) % (nBuffers - 1);
+          } else {
+            cmd.type = AVCmdType::Nack;
+          }
+          break;
+        }
+        case AVCmdType::HasFrame: {
+          if (readBuffer != writeBuffer) {
+            cmd.info.bufferIndex = readBuffer;
+            cmd.type = AVCmdType::Ack;
+            readBuffer = (readBuffer + 1) % (nBuffers - 1);
+          } else {
+            cmd.type = AVCmdType::Nack;
+          }
+          break;
+        }
+        case AVCmdType::Flush: {
+          size_t size = 0;
+          bool ret = false;
+          if (enc->isEncoder()) break;
+          else ret = enc->process(frameData, nullptr, size);
+          if (ret) {
+            cmd.info.bufferIndex = 0;
+            cmd.type = AVCmdType::Ack;
+          } else {
+            cmd.type = AVCmdType::Nack;
+          }
+          break;
+        }
+
         case AVCmdType::StopService: {
+          stopService = true;
           enc = nullptr;
           cmd.type = AVCmdType::Ack;
           break;
         }
-        case AVCmdType::EncodeFrame: {
-          cmd.eframe.size = enc->encode(frameData, packetData);
-          cmd.type = AVCmdType::Ack;
-          break;
-        }
         default: {
           cmd.type = AVCmdType::Nack;
           break;
         }
       }
       pipe->write(&cmd, sizeof(cmd));
+
+      if (stopService) {
+        break;
+      }
     }
     pipe = nullptr;
-
-  } else if (!strcmp(argv[1], "dec")) {
-    if (argc < 5) {
-      printUsage(argv[0]);
-      return 1;
-    }
-    int instanceId  = atoi(argv[2]);
-    int width       = atoi(argv[3]);
-    int height      = atoi(argv[4]);
-
-    auto dec = IAVDec::create(width, height, instanceId);
-    if (!dec) {
-      return 2;
-    }
-
-    auto pipe = IIPCPipe::create("avLibService" + std::to_string(instanceId), MESSAGE_BUFFER_SIZE, PIPE_BUFFER_SIZE);
-    if (!pipe) {
-      return 3;
-    }
-
-    auto packetData = pipe->getBuffer(0, 1024 * 1024);
-    auto frameData = pipe->getBuffer(1024 * 1024, width * height * 3);
-
-    auto lastKeepAlive = std::chrono::system_clock::now();
-    while (dec) {
-      auto keepAliveDur = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - lastKeepAlive);
-      if (keepAliveDur.count() > 10) break;
-
-      AVCmd cmd;
-      if (pipe->read(&cmd, sizeof(cmd), 200) != sizeof(cmd)) {
-        continue;
-      }
-      lastKeepAlive = std::chrono::system_clock::now();
-
-      switch (cmd.type) {
-        case AVCmdType::StopService: {
-          dec = nullptr;
-          cmd.type = AVCmdType::Ack;
-          break;
-        }
-        case AVCmdType::DecodeFrame: {
-          if (dec->decode(packetData, cmd.eframe.size, frameData)) cmd.type = AVCmdType::Ack;
-          else cmd.type = AVCmdType::Nack;
-          break;
-        }
-        default: {
-          cmd.type = AVCmdType::Nack;
-          break;
-        }
-      }
-      pipe->write(&cmd, sizeof(cmd));
-    }
-    pipe = nullptr;
-  } else if (!strcmp(argv[1], "test")) {
+  } else {
     printf("Starting encode test\n");
     int ret = runEncodeTest(argv[0]);
     if (ret) return ret;

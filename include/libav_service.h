@@ -1,13 +1,26 @@
 #pragma once
 
-#include <cstdint>
-#include <memory>
-#include <vector>
+#include <stdint.h>
+#include <string.h>
+
+#define MESSAGE_BUFFER_SIZE (100 * 1024)
+#define PIPE_BUFFER_SIZE (128 * 1024 * 1024)
 
 enum class AVCmdType : uint8_t {
   Unknown = 0,
-  EncodeFrame,
-  DecodeFrame,
+
+  GetEncoderCount,
+  GetEncoderName,
+  GetDecoderCount,
+  GetDecoderName,
+
+  OpenEncoder,
+  OpenDecoder,
+  Close,
+  Process,
+  Flush,
+  HasFrame,
+
   StopService,
 
   Ack,
@@ -20,46 +33,19 @@ typedef struct {
   uint16_t width;
   uint16_t height;
   uint8_t  fps;
+  char codecName[30];
 } AVInitInfo;
 
 typedef struct {
   size_t size;
+  uint8_t bufferIndex;
 } AVEncodeInfo;
-
-typedef struct {
-  size_t size;
-} AVDecodeInfo;
 
 typedef struct {
   AVCmdType type;
   union {
     AVInitInfo init;
-    AVEncodeInfo eframe;
-    AVEncodeInfo dframe;
+    AVEncodeInfo info;
   };
 } AVCmd;
 #pragma pack(pop)
-
-class IAVEnc;
-typedef std::shared_ptr<IAVEnc> AVEnc;
-class IAVEnc {
-public:
-  virtual ~IAVEnc() {}
-
-  static AVEnc create(int width, int height, int framesPerSecond, int bitsPerSecond, int instanceId);
-
-  virtual size_t encode(const void *frameData, void *packetData) = 0;
-};
-
-
-
-class IAVDec;
-typedef std::shared_ptr<IAVDec> AVDec;
-class IAVDec {
-public:
-  virtual ~IAVDec() {}
-
-  static AVDec create(int width, int height, int instanceId);
-
-  virtual bool decode(const void *packetData, size_t &packetSize, void *frameData) = 0;
-};

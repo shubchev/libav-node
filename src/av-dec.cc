@@ -1,4 +1,4 @@
-#include <libav_service.h>
+#include "av.h"
 #include <string>
 #include <sstream>
 #include <vector>
@@ -15,7 +15,7 @@ extern "C" {
 }
 #endif
 
-class AVDecoder : public IAVDec {
+class AVDecoder : public IAVEnc {
 public:
   AVDecoder() {
   }
@@ -28,28 +28,14 @@ public:
   AVFrame *frame = nullptr;
   AVPacket *pkt = nullptr;
 
-  bool init(int width, int height, int instanceId) {
+  bool init(const std::string &name, int width, int height) {
     if (width <= 0 || height <= 0 || (width & 2) || (height % 2)) {
       return false;
     }
 
-
-    std::vector<const AVCodec *> codecs;
-    const AVCodec *codec = NULL;
-    void *iter = NULL;
-    while (codec = av_codec_iterate(&iter)) {
-      if (!av_codec_is_decoder(codec)) continue;
-      if (strstr(codec->name, "hevc") || strstr(codec->name, "h265") ||
-          strstr(codec->name, "avc")  || strstr(codec->name, "h264")) {
-        codecs.push_back(codec);
-      }
-    }
-
-    for (auto &c : codecs) printf("Decoder: %s\n", c->name);
-
-    codec = avcodec_find_decoder_by_name("hevc");
+    auto codec = avcodec_find_decoder_by_name(name.c_str());
     if (!codec) {
-      fprintf(stderr, "Could not find video codec\n");
+      fprintf(stderr, "Could not find video codec: %s\n", name.c_str());
       return false;
     }
 
@@ -92,6 +78,9 @@ public:
       deinit();
       return false;
     }
+
+    codecName = name;
+    printf("Decoder opened: %s\n", codec->name);
 
     return true;
   }
@@ -139,7 +128,7 @@ public:
     return true;
   }
 
-  bool decode(const void *packetData, size_t &packetSize, void *frameData) override {
+  bool process(uint8_t *frameData, uint8_t *packetData, size_t &packetSize) override {
     auto ptr = (uint8_t *)packetData;
     while (packetSize > 0) {
       int ret = av_parser_parse2(parser, ctx, &pkt->data, &pkt->size, ptr, packetSize, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
@@ -159,17 +148,32 @@ public:
     return false;
   }
 
+  bool isEncoder() const override { return false; }
+
 };
 
+std::vector<std::string> IAVEnc::getDecoders() {
+  std::vector<std::string> codecs;
+  const AVCodec *codec = NULL;
+  void *iter = NULL;
+  while (codec = av_codec_iterate(&iter)) {
+    if (!av_codec_is_decoder(codec)) continue;
+    if (strstr(codec->name, "hevc") || strstr(codec->name, "h265") ||
+        strstr(codec->name, "avc")  || strstr(codec->name, "h264")) {
+      codecs.push_back(codec->name);
+    }
+  }
+  return codecs;
+}
 
 
-AVDec IAVDec::create(int width, int height, int instanceId) {
+AVEnc IAVEnc::createDecoder(const std::string &name, int width, int height) {
   auto dec = std::make_shared<AVDecoder>();
   if (!dec) {
     return nullptr;
   }
 
-  if (!dec->init(width, height, instanceId)) {
+  if (!dec->init(name, width, height)) {
     return nullptr;
   }
 
