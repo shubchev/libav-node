@@ -5,6 +5,9 @@
 #include <string>
 #include <vector>
 
+typedef std::vector<uint8_t> SingleArray;
+typedef std::vector<SingleArray> DoubleArray;
+
 class IAVEnc;
 typedef std::shared_ptr<IAVEnc> AVEnc;
 class IAVEnc {
@@ -21,6 +24,6 @@ public:
 
 
   virtual bool isEncoder() const = 0;
-  virtual bool process(uint8_t *frameData, uint8_t *packetData, size_t &packetSize) = 0;
+  virtual bool process(DoubleArray *frameData, SingleArray *packetData) = 0;
   const std::string &getName() const { return codecName; }
 };

@@ -92,7 +92,7 @@ public:
     if (pkt) av_packet_free(&pkt); pkt = nullptr;
   }
 
-  bool decode(void *frameData) {
+  bool decode(DoubleArray *frameData) {
     int ret = avcodec_send_packet(ctx, pkt);
     if (ret < 0) {
       fprintf(stderr, "Error sending a packet for decoding\n");
@@ -109,7 +109,10 @@ public:
         return false;
       }
 
-      auto dataPtr = (uint8_t *)frameData;
+      frameData->push_back(SingleArray());
+      frameData->back().resize(3 * frame->width * frame->height / 2);
+
+      auto dataPtr = frameData->back().data();
       int stride = frame->width;
       for (int y = 0; y < ctx->height; y++) {
         memcpy(dataPtr, &frame->data[0][y * frame->linesize[0]], stride);
@@ -128,24 +131,31 @@ public:
     return true;
   }
 
-  bool process(uint8_t *frameData, uint8_t *packetData, size_t &packetSize) override {
-    auto ptr = (uint8_t *)packetData;
-    while (packetSize > 0) {
+  bool process(DoubleArray *frameData, SingleArray *packetData) override {
+    if (!frameData) {
+      return false;
+    }
+
+    auto ptr = (packetData) ? packetData->data() : nullptr;
+    size_t packetSize = (packetData) ? packetData->size() : 0;
+    do {
       int ret = av_parser_parse2(parser, ctx, &pkt->data, &pkt->size, ptr, packetSize, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
       if (ret < 0) {
         fprintf(stderr, "Error while parsing\n");
         return false;
       }
 
-      ptr  += ret;
-      packetSize -= ret;
+      if (packetSize) {
+        ptr += ret;
+        packetSize -= ret;
+      }
 
       if (pkt->size) {
-        return decode(frameData);
+        if (!decode(frameData)) return false;
       }
-    }
+    } while (packetSize > 0);
 
-    return false;
+    return true;
   }
 
   bool isEncoder() const override { return false; }

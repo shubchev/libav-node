@@ -118,39 +118,50 @@ public:
     if (pkt) av_packet_free(&pkt); pkt = nullptr;
   }
 
-  bool process(uint8_t *frameData, uint8_t *packetData, size_t &packetSize) override {
-    packetSize = 0;
-    if (frameData) {
-      auto dataPtr = (uint8_t *)frameData;
-      int stride = frame->width;
-      for (int y = 0; y < ctx->height; y++) {
-        memcpy(&frame->data[0][y * frame->linesize[0]], dataPtr, stride);
-        dataPtr += stride;
+  bool process(DoubleArray *frameData, SingleArray *packetData) override {
+    int ret = 0;
+    for (size_t i = 0; frameData && i < frameData->size(); i++) {
+      {
+        auto dataPtr = frameData->at(i).data();
+        int stride = frame->width;
+        for (int y = 0; y < ctx->height; y++) {
+          memcpy(&frame->data[0][y * frame->linesize[0]], dataPtr, stride);
+          dataPtr += stride;
+        }
+
+        stride /= 2;
+        int scanline = ctx->height / 2;
+        for (int y = 0; y < ctx->height; y++) {
+          int planeIdx = 1 + (y / scanline);
+          memcpy(&frame->data[planeIdx][(y % scanline) * frame->linesize[planeIdx]], dataPtr, stride);
+          dataPtr += stride;
+        }
+
+        frame->pts = frameIdx++;
       }
 
-      stride /= 2;
-      int scanline = ctx->height / 2;
-      for (int y = 0; y < ctx->height; y++) {
-        int planeIdx = 1 + (y / scanline);
-        memcpy(&frame->data[planeIdx][(y % scanline) * frame->linesize[planeIdx]], dataPtr, stride);
-        dataPtr += stride;
+      ret = avcodec_send_frame(ctx, frame);
+      if (ret < 0) {
+        frameData->erase(frameData->begin(), frameData->begin() + i - 1);
+        fprintf(stderr, "Error sending a frame for encoding\n");
+        return false;
       }
-
-      frame->pts = frameIdx++;
     }
 
-    int ret;
-    if (frameData) ret = avcodec_send_frame(ctx, frame);
-    else ret = avcodec_send_frame(ctx, 0);
-    if (ret < 0) {
-      fprintf(stderr, "Error sending a frame for encoding\n");
-      return false;
+    if (!frameData) {
+      ret = avcodec_send_frame(ctx, 0);
+      if (ret < 0) {
+        fprintf(stderr, "Error sending a frame for encoding\n");
+        return false;
+      }
+    } else {
+      frameData->clear();
     }
 
     while (ret >= 0) {
       ret = avcodec_receive_packet(ctx, pkt);
       if (ret == AVERROR(EAGAIN) || ret == AVERROR_EOF) {
-        if (ret == AVERROR_EOF) return false;
+        if (ret == AVERROR_EOF) return (frameData) ? false : true;
         continue;
       } else if (ret < 0) {
         fprintf(stderr, "Error during encoding\n");
@@ -158,8 +169,7 @@ public:
       }
 
       if (packetData) {
-        packetSize = pkt->size;
-        memcpy(packetData, pkt->data, pkt->size);
+        packetData->insert(packetData->end(), pkt->data, pkt->data + pkt->size);
       }
 
       av_packet_unref(pkt);

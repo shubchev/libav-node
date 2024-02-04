@@ -3,7 +3,6 @@
 #include <stdint.h>
 #include <string.h>
 
-#define MESSAGE_BUFFER_SIZE (100 * 1024)
 #define PIPE_BUFFER_SIZE (128 * 1024 * 1024)
 
 enum class AVCmdType : uint8_t {
@@ -17,12 +16,16 @@ enum class AVCmdType : uint8_t {
   OpenEncoder,
   OpenDecoder,
   Close,
-  Process,
+  Encode,
+  Decode,
   Flush,
-  HasFrame,
+  GetPacket,
+  GetFrame,
 
   StopService,
+};
 
+enum class AVCmdResult : uint8_t {
   Ack,
   Nack,
 };
@@ -37,15 +40,10 @@ typedef struct {
 } AVInitInfo;
 
 typedef struct {
-  size_t size;
-  uint8_t bufferIndex;
-} AVEncodeInfo;
-
-typedef struct {
   AVCmdType type;
   union {
     AVInitInfo init;
-    AVEncodeInfo info;
+    size_t size;
   };
 } AVCmd;
 #pragma pack(pop)

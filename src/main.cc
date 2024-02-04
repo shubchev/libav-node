@@ -1,13 +1,8 @@
-#include "libav_service.h"
-#include "av.h"
-#include <chrono>
-#include <string>
-#include <sstream>
-#include <thread>
-#include "ipc-pipe.h"
-
 #ifdef WIN32
   #include <Windows.h>
+#ifdef max
+#undef max
+#endif
 #else
   #include <errno.h>
   #include <spawn.h>
@@ -19,11 +14,96 @@
   #include <wait.h>
 #endif
 
+#include "libav_service.h"
+#include "av.h"
+#include <chrono>
+#include <string>
+#include <sstream>
+#include <thread>
+#include "ipc-pipe.h"
+
 #include <boost/interprocess/shared_memory_object.hpp>
 #include <boost/interprocess/mapped_region.hpp>
 using namespace boost::interprocess;
 
 const char *appPath = nullptr;
+
+bool readAVCmd(IPCPipe pipe, AVCmd *cmd, int timeoutMs) {
+  if (pipe->read(cmd, sizeof(AVCmd), timeoutMs) != sizeof(AVCmd)) {
+    return false;
+  }
+  return true;
+}
+
+void sendAVCmdResult(IPCPipe pipe, AVCmdResult res, size_t size = 0) {
+  pipe->write(&res, sizeof(res));
+  pipe->write(&size, sizeof(size));
+}
+
+AVCmdResult readAVCmdResult(IPCPipe pipe, size_t *size = nullptr) {
+  AVCmdResult res;
+  size_t tmpSize = 0;
+  auto r1 = pipe->read(&res, sizeof(res));
+  auto r2 = pipe->read(&tmpSize, sizeof(tmpSize));
+  if (r1 != sizeof(res) || r2 != sizeof(tmpSize)) {
+    return AVCmdResult::Nack;
+  }
+  if (size) *size = tmpSize;
+  return res;
+}
+
+AVCmdResult sendAVCmd(IPCPipe pipe, const AVCmd &cmd, size_t *size = nullptr) {
+  if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
+    return AVCmdResult::Nack;
+  }
+
+  return readAVCmdResult(pipe, size);
+}
+
+AVCmdResult sendAVCmd(IPCPipe pipe, AVCmdType cmd) {
+  AVCmd cmdMsg;
+  cmdMsg.type = cmd;
+  return sendAVCmd(pipe, cmdMsg);
+}
+
+AVCmdResult getPacket(IPCPipe pipe, std::vector<uint8_t> &data) {
+  AVCmd cmdMsg;
+  size_t size = 0;
+
+  data.clear();
+
+  cmdMsg.type = AVCmdType::GetPacket;
+  if (sendAVCmd(pipe, cmdMsg, &size) != AVCmdResult::Ack || size == 0) {
+    return AVCmdResult::Nack;
+  }
+
+  data.resize(size);
+  if (pipe->read(data.data(), size) != size) {
+    data.clear();
+    return AVCmdResult::Nack;
+  }
+  return AVCmdResult::Ack;
+}
+
+AVCmdResult getFrame(IPCPipe pipe, std::vector<uint8_t> &data) {
+  AVCmd cmdMsg;
+  size_t size = 0;
+
+  data.clear();
+
+  cmdMsg.type = AVCmdType::GetFrame;
+  if (sendAVCmd(pipe, cmdMsg, &size) != AVCmdResult::Ack || size == 0) {
+    return AVCmdResult::Nack;
+  }
+
+  data.resize(size);
+  if (pipe->read(data.data(), size) != size) {
+    data.clear();
+    return AVCmdResult::Nack;
+  }
+  return AVCmdResult::Ack;
+}
+
 
 
 bool startProccess(const std::string &path, const std::vector<std::string> &params) {
@@ -62,25 +142,17 @@ IPCPipe openService(int instanceId) {
   startProccess(appPath, params);
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-  auto pipe = IIPCPipe::open("avLibService" + std::to_string(instanceId), MESSAGE_BUFFER_SIZE, PIPE_BUFFER_SIZE);
+  auto pipe = IIPCPipe::open("avLibService" + std::to_string(instanceId));
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
   return pipe;
 }
 
 int closeService(IPCPipe pipe) {
-  AVCmd cmd;
-  cmd.type = AVCmdType::StopService;
-  if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
+  if (sendAVCmd(pipe, AVCmdType::StopService) != AVCmdResult::Ack) {
     printf("Failed to send stop command\n");
     return 3;
   }
-  pipe->read(&cmd, sizeof(cmd));
-  if (cmd.type != AVCmdType::Ack) {
-    printf("Stop command got response: %d\n", (int)cmd.type);
-    return 3;
-  }
-
   return 0;
 }
 
@@ -103,10 +175,8 @@ int runEncodeTest(const char *appPath) {
     return 3;
   }
 
-  int bufferSize = 3 * width * height;
-  int nBuffers = PIPE_BUFFER_SIZE / bufferSize;
-  auto packetData = (uint8_t *)pipe->getBuffer(             0,              bufferSize);
-  auto frameData  = (uint8_t *)pipe->getBuffer(bufferSize, (nBuffers - 1) * bufferSize);
+  SingleArray packetData;
+  SingleArray frameData(3 * width * height / 2);
 
   AVCmd cmd;
   cmd.type = AVCmdType::OpenEncoder;
@@ -115,13 +185,7 @@ int runEncodeTest(const char *appPath) {
   cmd.init.fps      = fps;
   cmd.init.bps      = bps;
   strcpy(cmd.init.codecName, "hevc_nvenc");
-  if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
-    printf("Enc service init failed\n");
-    return 3;
-  }
-
-  pipe->read(&cmd, sizeof(cmd));
-  if (cmd.type != AVCmdType::Ack) {
+  if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
     printf("Enc service init failed\n");
     return 3;
   }
@@ -149,23 +213,44 @@ int runEncodeTest(const char *appPath) {
 
     auto startTs1 = std::chrono::system_clock::now();
 
-    cmd.type = AVCmdType::Process;
-    cmd.info.size = width * height * 3 / 2;
-    cmd.info.bufferIndex = 0;
-    pipe->write(&cmd, sizeof(cmd));
-    pipe->read(&cmd, sizeof(cmd));
-    if (cmd.type != AVCmdType::Ack) {
-      printf("Encode command got response: %d\n", (int)cmd.type);
+    // Send data for encoding
+    cmd.type = AVCmdType::Encode;
+    cmd.size = frameData.size();
+    if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
+      printf("Encode command got NACK response\n");
+    }
+    if (pipe->write(frameData.data(), frameData.size()) != frameData.size()) {
+      printf("Encode command failed to send frame data\n");
+    }
+    if (readAVCmdResult(pipe) != AVCmdResult::Ack) {
+      printf("Encoder failed to encode frame %d\n", i);
     }
 
-    auto endTs = std::chrono::system_clock::now();
-    printf("Time for preprocess: %0.3f s, Time for encode: %0.3f s, Packet size = %d\n",
+    // Get encoded data
+    if (getPacket(pipe, packetData) == AVCmdResult::Ack) {
+      auto endTs = std::chrono::system_clock::now();
+      printf("Time for preprocess: %0.3f s, Time for encode: %0.3f s, Packet size = %d\n",
             std::chrono::duration<float>(startTs1 - startTs).count(),
             std::chrono::duration<float>(endTs - startTs1).count(),
-            (int)cmd.info.size);
+            (int)packetData.size());
 
-    if (cmd.info.size) {
-      fwrite(packetData, 1, cmd.info.size, dumpFile);
+      fwrite(packetData.data(), 1, packetData.size(), dumpFile);
+    }
+  }
+
+  {
+    if (sendAVCmd(pipe, AVCmdType::Flush) != AVCmdResult::Ack) {
+      printf("Encode flush command got NACK response\n");
+    }
+
+    while (1) {
+      // Get encoded data
+      if (getPacket(pipe, packetData) == AVCmdResult::Ack) {
+        printf("Writing flush packet\n");
+        fwrite(packetData.data(), 1, packetData.size(), dumpFile);
+      } else {
+        break;
+      }
     }
   }
 
@@ -190,78 +275,62 @@ int runDecodeTest(const char *appPath) {
     return 3;
   }
 
-  int bufferSize = 3 * width * height;
-  int nBuffers = PIPE_BUFFER_SIZE / bufferSize;
-  auto packetData = (uint8_t *)pipe->getBuffer(             0,              bufferSize);
-  auto frameData  = (uint8_t *)pipe->getBuffer(bufferSize, (nBuffers - 1) * bufferSize);
+  SingleArray packetData(16 * 1024);
+  SingleArray frameData;
 
   AVCmd cmd;
   cmd.type = AVCmdType::OpenDecoder;
   cmd.init.width    = width;
   cmd.init.height   = height;
   strcpy(cmd.init.codecName, "hevc");
-  if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
-    printf("Enc service init failed\n");
+  if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
+    printf("Dec service init failed\n");
     return 3;
   }
 
-  pipe->read(&cmd, sizeof(cmd));
-  if (cmd.type != AVCmdType::Ack) {
-    printf("Enc service init failed\n");
-    return 3;
-  }
-
-
-  size_t lastRead, remainingBytes = 0;
   int frameId = 0;
   while (!feof(dumpFile)) {
-    if (remainingBytes) memmove(packetData, &packetData[lastRead - remainingBytes], remainingBytes);
-    remainingBytes += fread(&packetData[remainingBytes], 1, 16 * 1024 - remainingBytes, dumpFile);
-    lastRead = remainingBytes;
-    cmd.type = AVCmdType::Process;
-    if (remainingBytes) {
-      cmd.info.size = remainingBytes;
-      if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
-        printf("Failed to send decode command\n");
+    cmd.size = fread(packetData.data(), 1, packetData.size(), dumpFile);
+    if (cmd.size) {
+      // Send data for decoding
+      cmd.type = AVCmdType::Decode;
+      if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
+        printf("Decode command got NACK response\n");
       }
-      pipe->read(&cmd, sizeof(cmd));
-      remainingBytes = cmd.info.size;
+      if (pipe->write(packetData.data(), cmd.size) != cmd.size) {
+        printf("Decode command failed to send packet data\n");
+      }
+      if (readAVCmdResult(pipe) != AVCmdResult::Ack) {
+        printf("Decoder failed to decode frame %d\n", frameId);
+      }
     }
 
+    // Get decoded data
     while (1) {
-      cmd.type = AVCmdType::HasFrame;
-      if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
-        printf("Failed to send frame check command\n");
+      if (getFrame(pipe, frameData) != AVCmdResult::Ack) {
         break;
       }
-      pipe->read(&cmd, sizeof(cmd));
-      if (cmd.type == AVCmdType::Ack) {
-        std::string name = std::string("frame") + std::to_string(frameId++) + ".raw";
-        FILE *fp = fopen(name.c_str(), "wb");
-        fwrite(&frameData[cmd.info.bufferIndex * 3 * width * height], 1, width * height * 3, fp);
-        fclose(fp);
-      } else {
-        break;
-      }
-    }
-    printf("Decode resp %d %d %d %d\n", (int)cmd.type, (int)remainingBytes, (int)lastRead, (int)frameId);  
-  }
-  fclose(dumpFile);
-  while (1) {
-    cmd.type = AVCmdType::Flush;
-    if (pipe->write(&cmd, sizeof(cmd)) != sizeof(cmd)) {
-      printf("Failed to send flush command\n");
-      break;
-    }
-    pipe->read(&cmd, sizeof(cmd));
-    if (cmd.type == AVCmdType::Ack) {
+      printf("Decoded frame %d\n", (int)frameId);
+
       std::string name = std::string("frame") + std::to_string(frameId++) + ".raw";
       FILE *fp = fopen(name.c_str(), "wb");
-      fwrite(&frameData[cmd.info.bufferIndex * 3 * width * height], 1, width * height * 3, fp);
+      fwrite(frameData.data(), 1, frameData.size(), fp);
       fclose(fp);
-    } else {
+    }
+  }
+  fclose(dumpFile);
+
+  while (1) {
+    sendAVCmd(pipe, AVCmdType::Flush);
+    if (getFrame(pipe, frameData) != AVCmdResult::Ack) {
       break;
     }
+    printf("Decoded frame %d\n", (int)frameId);
+
+    std::string name = std::string("frame") + std::to_string(frameId++) + ".raw";
+    FILE *fp = fopen(name.c_str(), "wb");
+    fwrite(frameData.data(), 1, frameData.size(), fp);
+    fclose(fp);
   }
 
   return closeService(pipe);
@@ -286,7 +355,6 @@ int main(int argc, char **argv) {
   if (!isTest) {
     AVEnc enc;
     int width, height, fps, bps;
-    int readBuffer = 0, writeBuffer = 0;
 
     int instanceId = -1;
     if (sscanf(argv[1], "%d", &instanceId) != 1 || instanceId < 0) {
@@ -294,7 +362,7 @@ int main(int argc, char **argv) {
       return 1;
     }
 
-    auto pipe = IIPCPipe::create("avLibService" + std::to_string(instanceId), MESSAGE_BUFFER_SIZE, PIPE_BUFFER_SIZE);
+    auto pipe = IIPCPipe::create("avLibService" + std::to_string(instanceId), PIPE_BUFFER_SIZE);
     if (!pipe) {
       return 3;
     }
@@ -312,11 +380,8 @@ int main(int argc, char **argv) {
     }
 
 
-    int bufferSize = 0, nBuffers = 0;
-    uint8_t *packetData = nullptr, *frameData = nullptr;
-
-    AVCmd cmd;
-    cmd.type = AVCmdType::Ack;
+    SingleArray packetData;
+    DoubleArray frameData;
 
     auto lastKeepAlive = std::chrono::system_clock::now();
     bool stopService = false;
@@ -324,45 +389,41 @@ int main(int argc, char **argv) {
       auto keepAliveDur = std::chrono::duration_cast<std::chrono::seconds>(std::chrono::system_clock::now() - lastKeepAlive);
       if (keepAliveDur.count() > 10) break;
 
-      if (pipe->read(&cmd, sizeof(cmd), 200) != sizeof(cmd)) {
+      AVCmd cmd;
+      if (!readAVCmd(pipe, &cmd, 200)) {
         continue;
       }
       lastKeepAlive = std::chrono::system_clock::now();
 
       switch (cmd.type) {
         case AVCmdType::GetEncoderCount: {
-          cmd.type = AVCmdType::Ack;
-          cmd.info.size = encoders.size();
+          sendAVCmdResult(pipe, AVCmdResult::Ack, encoders.size());
           break;
         }
         case AVCmdType::GetEncoderName: {
-          if (cmd.info.bufferIndex < encoders.size()) {
-            cmd.type = AVCmdType::Ack;
-            snprintf(cmd.init.codecName, sizeof(cmd.init.codecName), "%s", encoders[cmd.info.bufferIndex].c_str());
-          } else cmd.type = AVCmdType::Nack;
+          if (cmd.size < encoders.size()) {
+            sendAVCmdResult(pipe, AVCmdResult::Ack, encoders[cmd.size].length());
+            pipe->write(encoders[cmd.size].c_str(), encoders[cmd.size].length());
+          } else {
+            sendAVCmdResult(pipe, AVCmdResult::Nack);
+          }
           break;
         }
         case AVCmdType::GetDecoderCount: {
-          cmd.type = AVCmdType::Ack;
-          cmd.info.size = decoders.size();
+          sendAVCmdResult(pipe, AVCmdResult::Ack, decoders.size());
           break;
         }
         case AVCmdType::GetDecoderName: {
-          if (cmd.info.bufferIndex < decoders.size()) {
-            cmd.type = AVCmdType::Ack;
-            snprintf(cmd.init.codecName, sizeof(cmd.init.codecName), "%s", decoders[cmd.info.bufferIndex].c_str());
-          } else cmd.type = AVCmdType::Nack;
+          if (cmd.size < decoders.size()) {
+            sendAVCmdResult(pipe, AVCmdResult::Ack, decoders[cmd.size].length());
+            pipe->write(decoders[cmd.size].c_str(), decoders[cmd.size].length());
+          } else {
+            sendAVCmdResult(pipe, AVCmdResult::Nack);
+          }
           break;
         }
         case AVCmdType::OpenEncoder:
         case AVCmdType::OpenDecoder: {
-          bufferSize = 3 * cmd.init.width * cmd.init.height;
-          nBuffers = PIPE_BUFFER_SIZE / bufferSize;
-          if (nBuffers < 2) {
-            cmd.type = AVCmdType::Nack;
-            break;
-          }
-
           std::string codecName;
           if (cmd.type == AVCmdType::OpenDecoder) {
             for (auto &c : decoders) if (c.find(cmd.init.codecName) == 0) { codecName = c; break; }
@@ -370,75 +431,105 @@ int main(int argc, char **argv) {
             for (auto &c : encoders) if (c.find(cmd.init.codecName) == 0) { codecName = c; break; }
           }
 
-          writeBuffer = readBuffer = 0;
-          packetData = (uint8_t *)pipe->getBuffer(             0,              bufferSize);
-          frameData  = (uint8_t *)pipe->getBuffer(bufferSize, (nBuffers - 1) * bufferSize);
-
           if (cmd.type == AVCmdType::OpenDecoder) enc = IAVEnc::createDecoder(codecName, cmd.init.width, cmd.init.height);
           else enc = IAVEnc::createEncoder(codecName, cmd.init.width, cmd.init.height, cmd.init.fps, cmd.init.bps);
           if (enc) {
-            cmd.type = AVCmdType::Ack;
             width = cmd.init.width;
             height = cmd.init.height;
+            sendAVCmdResult(pipe, AVCmdResult::Ack);
           } else {
-            cmd.type = AVCmdType::Nack;
             width = height = 0;
-            packetData = frameData = nullptr;
+            packetData.clear(); packetData.shrink_to_fit();
+            frameData.clear(); frameData.shrink_to_fit();
+            sendAVCmdResult(pipe, AVCmdResult::Nack);
           }
           break;
         }
         case AVCmdType::Close: {
           enc = nullptr;
+          width = height = 0;
+          packetData.clear(); packetData.shrink_to_fit();
+          frameData.clear(); frameData.shrink_to_fit();
+          sendAVCmdResult(pipe, AVCmdResult::Ack);
           break;
         }
-        case AVCmdType::Process: {
-          bool ret;
-          if (enc->isEncoder()) ret = enc->process(&frameData[cmd.info.bufferIndex * bufferSize], packetData, cmd.info.size);
-          else ret = enc->process(&frameData[writeBuffer * bufferSize], packetData, cmd.info.size);
-          if (ret) {
-            cmd.type = AVCmdType::Ack;
-            if (!enc->isEncoder()) writeBuffer = (writeBuffer + 1) % (nBuffers - 1);
+        case AVCmdType::Encode: {
+          if (!enc || !enc->isEncoder()) {
+            sendAVCmdResult(pipe, AVCmdResult::Nack);
+            break;
+          } else sendAVCmdResult(pipe, AVCmdResult::Ack);
+
+          frameData.push_back(SingleArray());
+          frameData.back().resize(cmd.size);
+          packetData.clear();
+          if (pipe->read(frameData.back().data(), cmd.size) != cmd.size) {
+            sendAVCmdResult(pipe, AVCmdResult::Nack);
+            break;
+          }
+
+          bool ret = enc->process(&frameData, &packetData);
+          if (ret) sendAVCmdResult(pipe, AVCmdResult::Ack);
+          else sendAVCmdResult(pipe, AVCmdResult::Nack);
+          break;
+        }
+        case AVCmdType::Decode: {
+          if (!enc || enc->isEncoder()) {
+            sendAVCmdResult(pipe, AVCmdResult::Nack);
+            break;
+          } else sendAVCmdResult(pipe, AVCmdResult::Ack);
+
+          packetData.resize(cmd.size);
+          if (pipe->read(packetData.data(), cmd.size) != cmd.size) {
+            sendAVCmdResult(pipe, AVCmdResult::Nack);
+            break;
+          }
+
+          bool ret = enc->process(&frameData, &packetData);
+          if (ret) sendAVCmdResult(pipe, AVCmdResult::Ack);
+          else sendAVCmdResult(pipe, AVCmdResult::Nack);
+          break;
+        }
+        case AVCmdType::GetPacket: {
+          if (packetData.size()) {
+            sendAVCmdResult(pipe, AVCmdResult::Ack, packetData.size());
+            pipe->write(packetData.data(), packetData.size());
+            packetData.clear();
           } else {
-            cmd.type = AVCmdType::Nack;
+            sendAVCmdResult(pipe, AVCmdResult::Nack);
           }
           break;
         }
-        case AVCmdType::HasFrame: {
-          if (readBuffer != writeBuffer) {
-            cmd.info.bufferIndex = readBuffer;
-            cmd.type = AVCmdType::Ack;
-            readBuffer = (readBuffer + 1) % (nBuffers - 1);
+        case AVCmdType::GetFrame: {
+          if (frameData.size()) {
+            auto &data = frameData.front();
+            sendAVCmdResult(pipe, AVCmdResult::Ack, data.size());
+            pipe->write(data.data(), data.size());
+            frameData.erase(frameData.begin());
           } else {
-            cmd.type = AVCmdType::Nack;
+            sendAVCmdResult(pipe, AVCmdResult::Nack);
           }
           break;
         }
         case AVCmdType::Flush: {
-          size_t size = 0;
           bool ret = false;
-          if (enc->isEncoder()) break;
-          else ret = enc->process(frameData, nullptr, size);
-          if (ret) {
-            cmd.info.bufferIndex = 0;
-            cmd.type = AVCmdType::Ack;
-          } else {
-            cmd.type = AVCmdType::Nack;
-          }
+          if (enc->isEncoder()) ret = enc->process(nullptr, &packetData);
+          else ret = enc->process(&frameData, nullptr);
+          if (ret) sendAVCmdResult(pipe, AVCmdResult::Ack);
+          else sendAVCmdResult(pipe, AVCmdResult::Nack);
           break;
         }
 
         case AVCmdType::StopService: {
           stopService = true;
           enc = nullptr;
-          cmd.type = AVCmdType::Ack;
+          sendAVCmdResult(pipe, AVCmdResult::Ack);
           break;
         }
         default: {
-          cmd.type = AVCmdType::Nack;
+          sendAVCmdResult(pipe, AVCmdResult::Nack);
           break;
         }
       }
-      pipe->write(&cmd, sizeof(cmd));
 
       if (stopService) {
         break;
