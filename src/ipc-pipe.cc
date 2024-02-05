@@ -8,9 +8,15 @@
 #ifdef _WIN32
 #include <Windows.h>
 #else
-
+#include <fcntl.h>
+#include <poll.h>
+#include <unistd.h>
+#include <sys/socket.h>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <sys/un.h>
+#define ACCESS_MODE (S_IRWXU | S_IRWXG | S_IRWXO)
 #endif
-
 
 class IPCPipeImpl : public IIPCPipe {
 public:
@@ -20,6 +26,9 @@ public:
 #ifdef _WIN32
     if (hPipe != INVALID_HANDLE_VALUE) CloseHandle(hPipe);
 #else
+    if (hPipe >= 0) close(hPipe);
+    if (hClient >= 0) close(hClient);
+    if (pipeName.length()) ::unlink(pipeName.c_str());
 #endif
   }
 
@@ -35,16 +44,25 @@ public:
 #ifdef _WIN32
     DWORD bytesWritten = 0;
     while (totalBytes < size && retry > 0) {
-      if (!WriteFile(hPipe, &ptr[bytesWritten], size - bytesWritten, &bytesWritten, NULL)) {
+      if (!WriteFile(hPipe, &ptr[totalBytes], size - totalBytes, &bytesWritten, NULL)) {
         retry--;
       } else {
         totalBytes += bytesWritten;
       }
     }
-    return totalBytes;
 #else
-
+    int ret;
+    while (totalBytes < size && retry > 0) {
+      ret = ::write(hClient, &ptr[totalBytes], size - totalBytes);
+      if (ret <= 0) {
+        retry--;
+        fprintf(stderr, "Writing pipe failed with error %d\n", errno);
+      } else {
+        totalBytes += ret;
+      }
+    }
 #endif
+    return totalBytes;
   }
 
   size_t read(void *data, size_t size, int timeoutMs) override {
@@ -59,7 +77,7 @@ public:
     DWORD bytesRead = 0;
     auto start = std::chrono::high_resolution_clock::now();
     while (totalBytes < size) {
-      if (!ReadFile(hPipe, &ptr[bytesRead], size - bytesRead, &bytesRead, NULL)) {
+      if (!ReadFile(hPipe, &ptr[totalBytes], size - totalBytes, &bytesRead, NULL)) {
         auto end = std::chrono::high_resolution_clock::now();
         if (timeoutMs >= 0 && std::chrono::duration<double>(end - start).count() > 0.001 * timeoutMs) {
           return totalBytes;
@@ -70,17 +88,38 @@ public:
         totalBytes += bytesRead;
       }
     }
-    return totalBytes;
 #else
-
+    int ret;
+    struct pollfd fds;
+    while (totalBytes < size) {
+      fds.fd = hClient;
+      fds.events = POLLIN;
+      fds.revents = 0;
+      ret = ::poll(&fds, 1, timeoutMs);
+      if (ret < 0) {
+        fprintf(stderr, "Polling pipe failed with error %d\n", errno);
+      } else if (ret == 0) {
+        return totalBytes;
+      } else if (fds.revents & POLLIN) {
+        ret = ::read(hClient, &ptr[totalBytes], size - totalBytes);
+        if (ret < 0) {
+          fprintf(stderr, "Reading pipe failed with error %d\n", errno);
+          return totalBytes;
+        }
+        totalBytes += ret;
+      }
+    }
 #endif
+    return totalBytes;
   }
 
 
 #ifdef _WIN32
   HANDLE hPipe = INVALID_HANDLE_VALUE;
 #else
-
+  int hPipe = -1;
+  int hClient = -1;
+  std::string pipeName;
 #endif
 };
 
@@ -98,11 +137,40 @@ IPCPipe IIPCPipe::create(const std::string &name, size_t bufferStorageSize) try 
                                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                                1, bufferStorageSize, bufferStorageSize, 0, NULL);
   if (ipc->hPipe == INVALID_HANDLE_VALUE) {
-    fprintf(stderr, "Could not create pipe. Error %d\n", GetLastError());
+    fprintf(stderr, "create: Could not create pipe. Error %d\n", GetLastError());
     return nullptr;
   }
 #else
+  ipc->pipeName = "/tmp/" + name;
+  ::unlink(ipc->pipeName.c_str());
+  ipc->hPipe = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (ipc->hPipe == -1) {
+    fprintf(stderr, "create: Could not create pipe. Error %d\n", errno);
+    return nullptr;
+  }
 
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, ipc->pipeName.c_str(), sizeof(addr.sun_path) - 1);
+
+  int ret = bind(ipc->hPipe, (const struct sockaddr *)&addr, sizeof(addr));
+  if (ret == -1) {
+    fprintf(stderr, "create: Could not bind pipe. Error %d\n", errno);
+    return nullptr;
+  }
+
+  ret = listen(ipc->hPipe, 1);
+  if (ret == -1) {
+    fprintf(stderr, "create: Could not listen pipe. Error %d\n", errno);
+    return nullptr;
+  }
+
+  ipc->hClient = accept(ipc->hPipe, NULL, NULL);
+  if (ipc->hClient == -1) {
+    fprintf(stderr, "create: Failed to accept pipe client. Error %d\n", errno);
+    return nullptr;
+  }
 #endif
 
   return ipc;
@@ -126,19 +194,35 @@ IPCPipe IIPCPipe::open(const std::string &name) try {
     }
 
     if (GetLastError() != ERROR_PIPE_BUSY) {
-      fprintf(stderr, "Could not open pipe. Error %d\n", GetLastError());
+      fprintf(stderr, "open: Could not open pipe. Error %d\n", GetLastError());
       return nullptr;
     }
 
     // All pipe instances are busy, so wait for 20 seconds. 
 
     if (!WaitNamedPipe(name.c_str(), 20000)) {
-      fprintf(stderr, "Could not open pipe: 20 second wait timed out.");
+      fprintf(stderr, "open: Could not open pipe: 20 second wait timed out.");
       return nullptr;
     }
   }
 #else
+  std::string pipeName = "/tmp/" + name;
+  ipc->hClient = socket(AF_UNIX, SOCK_STREAM, 0);
+  if (ipc->hClient == -1) {
+    fprintf(stderr, "open: Could not create pipe. Error %d\n", errno);
+    return nullptr;
+  }
 
+  struct sockaddr_un addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sun_family = AF_UNIX;
+  strncpy(addr.sun_path, pipeName.c_str(), sizeof(addr.sun_path) - 1);
+
+  int ret = connect(ipc->hClient, (const struct sockaddr *)&addr, sizeof(addr));
+  if (ret == -1) {
+    fprintf(stderr, "open: Could not connect pipe. Error %d\n", errno);
+    return nullptr;
+  }
 #endif
 
   return ipc;
