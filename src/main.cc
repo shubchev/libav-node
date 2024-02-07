@@ -43,8 +43,8 @@ void sendAVCmdResult(IPCPipe pipe, AVCmdResult res, size_t size = 0) {
 AVCmdResult readAVCmdResult(IPCPipe pipe, size_t *size = nullptr) {
   AVCmdResult res;
   size_t tmpSize = 0;
-  auto r1 = pipe->read(&res, sizeof(res));
-  auto r2 = pipe->read(&tmpSize, sizeof(tmpSize));
+  auto r1 = pipe->read(&res, sizeof(res), 5000);
+  auto r2 = pipe->read(&tmpSize, sizeof(tmpSize), 5000);
   if (r1 != sizeof(res) || r2 != sizeof(tmpSize)) {
     return AVCmdResult::Nack;
   }
@@ -78,7 +78,7 @@ AVCmdResult getPacket(IPCPipe pipe, std::vector<uint8_t> &data) {
   }
 
   data.resize(size);
-  if (pipe->read(data.data(), size) != size) {
+  if (pipe->read(data.data(), size, 5000) != size) {
     data.clear();
     return AVCmdResult::Nack;
   }
@@ -97,7 +97,7 @@ AVCmdResult getFrame(IPCPipe pipe, std::vector<uint8_t> &data) {
   }
 
   data.resize(size);
-  if (pipe->read(data.data(), size) != size) {
+  if (pipe->read(data.data(), size, 5000) != size) {
     data.clear();
     return AVCmdResult::Nack;
   }
@@ -356,29 +356,21 @@ int main(int argc, char **argv) {
     AVEnc enc;
     int width, height, fps, bps;
 
-    int instanceId = -1;
-    if (sscanf(argv[1], "%d", &instanceId) != 1 || instanceId < 0) {
+    std::string instanceId = argv[1];
+    if (instanceId.empty()) {
       printf("Invalid instance id: %s\n", argv[1]);
       return 1;
     }
 
-    auto pipe = IIPCPipe::create("avLibService" + std::to_string(instanceId), PIPE_BUFFER_SIZE);
+    auto pipe = IIPCPipe::create(instanceId, PIPE_BUFFER_SIZE);
     if (!pipe) {
       return 3;
     }
 
-    printf("Starting libav-node service, session id %d\n", instanceId);
+    printf("Starting libav-node service, session id %s\n", instanceId.c_str());
 
     auto encoders = IAVEnc::getEncoders();
     auto decoders = IAVEnc::getDecoders();
-    printf("Encoders\t|\tDecoders\n");
-    for (size_t i = 0; i < std::max(encoders.size(), decoders.size()); i++) {
-      if (i < encoders.size()) printf("%s\t|\t", encoders[i].c_str());
-      else printf("\t\t|\t");
-      if (i < decoders.size()) printf("%s\n", decoders[i].c_str());
-      else printf("\t\n");
-    }
-
 
     SingleArray packetData;
     DoubleArray frameData;
