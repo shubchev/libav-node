@@ -20,11 +20,13 @@
 #include <string>
 #include <sstream>
 #include <thread>
+#include <codecvt>
 #include "ipc-pipe.h"
 
-#include <boost/interprocess/shared_memory_object.hpp>
-#include <boost/interprocess/mapped_region.hpp>
-using namespace boost::interprocess;
+std::string to_string(const std::wstring &str) {
+  std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> utf16conv;
+  return utf16conv.to_bytes(str);
+}
 
 const char *appPath = nullptr;
 
@@ -157,7 +159,7 @@ int closeService(IPCPipe pipe) {
 }
 
 
-int runEncodeTest(const char *appPath, bool &isHEVC) {
+int runEncodeTest(bool &isHEVC) {
   FILE *dumpFile = fopen("test.mp4", "wb");
   if (!dumpFile) {
     printf("Failed to open test.mp4\n");
@@ -200,8 +202,8 @@ int runEncodeTest(const char *appPath, bool &isHEVC) {
   }
 
   for (int i = 0; i < 120; i++) {
-    auto startTs = std::chrono::system_clock::now();
 
+    auto startTs = std::chrono::system_clock::now();
     int stride = width;
     int plane1Offset = stride * height;
     int plane2Offset = plane1Offset + width * height / 4;
@@ -269,7 +271,7 @@ int runEncodeTest(const char *appPath, bool &isHEVC) {
 }
 
 
-int runDecodeTest(const char *appPath, bool isHEVC) {
+int runDecodeTest(bool isHEVC) {
   FILE *dumpFile = fopen("test.mp4", "rb");
   if (!dumpFile) {
     printf("Failed to open test.mp4\n");
@@ -347,7 +349,7 @@ int runDecodeTest(const char *appPath, bool isHEVC) {
   return closeService(pipe);
 }
 
-void printUsage(const char *appPath) {
+void printUsage() {
   const char *pn = appPath;
   auto tmp = pn;
   while (tmp = strstr(tmp + 1, "\\")) pn = tmp + 1;
@@ -355,21 +357,41 @@ void printUsage(const char *appPath) {
           "  Usage: %s [test | <instanceId>]\n", pn);
 }
 
+#ifdef _WIN32
+int WINAPI wWinMain(HINSTANCE hInstance,
+                    HINSTANCE hPrevInstance,
+                    PWSTR pCmdLine,
+                    int nCmdShow) {
+  std::vector<std::string> argvA;
+  int argc;
+  {
+    auto argvW = CommandLineToArgvW(pCmdLine, &argc);
+    char appCmd[1024];
+    GetModuleFileName(NULL, appCmd, sizeof(appCmd));
+    argvA.push_back(appCmd);
+    for (int i = 0; i < argc; i++) argvA.push_back(to_string(argvW[i]));
+    argc++;
+    LocalFree(argvW);
+  }
+#else
 int main(int argc, char **argv) {
-  appPath = argv[0];
+  std::vector<std::string> argvA;
+  for (int i = 0; i < argc; i++) argvA.push_back(argv[i]);
+#endif
+  appPath = argvA[0].c_str();
   if (argc < 2) {
-    printUsage(argv[0]);
+    printUsage();
     return 1;
   }
 
-  bool isTest = !strcmp(argv[1], "test");
+  bool isTest = argvA[1] == "test";
   if (!isTest) {
     AVEnc enc;
     int width, height, fps, bps;
 
-    std::string instanceId = argv[1];
+    std::string instanceId = argvA[1];
     if (instanceId.empty()) {
-      printf("Invalid instance id: %s\n", argv[1]);
+      printf("Invalid instance id\n");
       return 1;
     }
 
@@ -536,12 +558,12 @@ int main(int argc, char **argv) {
   } else {
     bool isHEVC = false;
     printf("Starting encode test\n");
-    int ret = runEncodeTest(argv[0], isHEVC);
+    int ret = runEncodeTest(isHEVC);
     if (ret) return ret;
 
     std::this_thread::sleep_for(std::chrono::milliseconds(4000));
     printf("Starting decode test\n");
-    return runDecodeTest(argv[0], isHEVC);
+    return runDecodeTest(isHEVC);
   }
   printf("Exit service.\n");
   return 0;
