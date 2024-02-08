@@ -16,6 +16,14 @@ extern "C" {
 }
 #endif
 
+class InitLibAV {
+public:
+  InitLibAV() {
+    av_register_all();
+  }
+};
+InitLibAV initLibAV;
+
 class AVEncoder : public IAVEnc {
 public:
   AVEncoder() {
@@ -185,8 +193,7 @@ public:
 std::vector<std::string> IAVEnc::getEncoders() {
   std::vector<std::string> codecs;
   const AVCodec *codec = NULL;
-  void *iter = NULL;
-  while (codec = av_codec_iterate(&iter)) {
+  while (codec = av_codec_next(codec)) {
     if (!av_codec_is_encoder(codec)) continue;
     if (strstr(codec->name, "hevc") || strstr(codec->name, "h265") ||
         strstr(codec->name, "avc") || strstr(codec->name, "h264")) {

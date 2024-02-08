@@ -157,7 +157,7 @@ int closeService(IPCPipe pipe) {
 }
 
 
-int runEncodeTest(const char *appPath) {
+int runEncodeTest(const char *appPath, bool &isHEVC) {
   FILE *dumpFile = fopen("test.mp4", "wb");
   if (!dumpFile) {
     printf("Failed to open test.mp4\n");
@@ -184,10 +184,19 @@ int runEncodeTest(const char *appPath) {
   cmd.init.height   = height;
   cmd.init.fps      = fps;
   cmd.init.bps      = bps;
+
+  // try open hevc
   strcpy(cmd.init.codecName, "hevc_nvenc");
   if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
-    printf("Enc service init failed\n");
-    return 3;
+    isHEVC = false;
+    // try open h264
+    strcpy(cmd.init.codecName, "h264_nvenc");
+    if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
+      printf("Enc service init failed\n");
+      return 3;
+    }
+  } else {
+    isHEVC = true;
   }
 
   for (int i = 0; i < 120; i++) {
@@ -260,7 +269,7 @@ int runEncodeTest(const char *appPath) {
 }
 
 
-int runDecodeTest(const char *appPath) {
+int runDecodeTest(const char *appPath, bool isHEVC) {
   FILE *dumpFile = fopen("test.mp4", "rb");
   if (!dumpFile) {
     printf("Failed to open test.mp4\n");
@@ -282,7 +291,9 @@ int runDecodeTest(const char *appPath) {
   cmd.type = AVCmdType::OpenDecoder;
   cmd.init.width    = width;
   cmd.init.height   = height;
-  strcpy(cmd.init.codecName, "hevc");
+
+  if (isHEVC) strcpy(cmd.init.codecName, "hevc");
+  else strcpy(cmd.init.codecName, "h264");
   if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
     printf("Dec service init failed\n");
     return 3;
@@ -416,13 +427,7 @@ int main(int argc, char **argv) {
         }
         case AVCmdType::OpenEncoder:
         case AVCmdType::OpenDecoder: {
-          std::string codecName;
-          if (cmd.type == AVCmdType::OpenDecoder) {
-            for (auto &c : decoders) if (c.find(cmd.init.codecName) == 0) { codecName = c; break; }
-          } else {
-            for (auto &c : encoders) if (c.find(cmd.init.codecName) == 0) { codecName = c; break; }
-          }
-
+          std::string codecName = cmd.init.codecName;
           if (cmd.type == AVCmdType::OpenDecoder) enc = IAVEnc::createDecoder(codecName, cmd.init.width, cmd.init.height);
           else enc = IAVEnc::createEncoder(codecName, cmd.init.width, cmd.init.height, cmd.init.fps, cmd.init.bps);
           if (enc) {
@@ -529,13 +534,14 @@ int main(int argc, char **argv) {
     }
     pipe = nullptr;
   } else {
+    bool isHEVC = false;
     printf("Starting encode test\n");
-    int ret = runEncodeTest(argv[0]);
+    int ret = runEncodeTest(argv[0], isHEVC);
     if (ret) return ret;
 
     std::this_thread::sleep_for(std::chrono::milliseconds(4000));
     printf("Starting decode test\n");
-    return runDecodeTest(argv[0]);
+    return runDecodeTest(argv[0], isHEVC);
   }
   printf("Exit service.\n");
   return 0;
