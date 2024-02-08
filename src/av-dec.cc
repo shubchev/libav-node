@@ -165,7 +165,12 @@ public:
 std::vector<std::string> IAVEnc::getDecoders() {
   std::vector<std::string> codecs;
   const AVCodec *codec = NULL;
+#ifdef _WIN32
+  void *iter = NULL;
+  while (codec = av_codec_iterate(&iter)) {
+#else
   while (codec = av_codec_next(codec)) {
+#endif
     if (!av_codec_is_decoder(codec)) continue;
     if (strstr(codec->name, "hevc") || strstr(codec->name, "h265") ||
         strstr(codec->name, "avc")  || strstr(codec->name, "h264")) {

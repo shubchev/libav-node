@@ -16,13 +16,16 @@ extern "C" {
 }
 #endif
 
-class InitLibAV {
+#ifndef _WIN32
+class InitAV {
 public:
-  InitLibAV() {
+  InitAV() {
     av_register_all();
   }
 };
-InitLibAV initLibAV;
+InitAV initAV;
+#endif
+
 
 class AVEncoder : public IAVEnc {
 public:
@@ -193,7 +196,12 @@ public:
 std::vector<std::string> IAVEnc::getEncoders() {
   std::vector<std::string> codecs;
   const AVCodec *codec = NULL;
+#ifdef _WIN32
+  void *iter = NULL;
+  while (codec = av_codec_iterate(&iter)) {
+#else
   while (codec = av_codec_next(codec)) {
+#endif
     if (!av_codec_is_encoder(codec)) continue;
     if (strstr(codec->name, "hevc") || strstr(codec->name, "h265") ||
         strstr(codec->name, "avc") || strstr(codec->name, "h264")) {

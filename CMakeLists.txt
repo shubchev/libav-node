@@ -4,8 +4,6 @@ project(libav-node)
 
 set(CMAKE_CXX_STANDARD 20)
 
-set(boost_use_static_libs on)
-find_package(Boost REQUIRED date_time)
 
 if (WIN32)
     set(LIBAV_ROOT $ENV{LIBAV_ROOT})
@@ -24,7 +22,6 @@ add_executable(libav-node WIN32
 # Library Paths
 target_link_directories (libav-node PRIVATE
     ${LIBAV_LIBRARY_DIRS}
-    ${Boost_LIBRARY_DIRS}
 )
 
 # Libraries to compile
@@ -45,5 +42,4 @@ target_link_libraries (libav-node PRIVATE
 target_include_directories (libav-node PUBLIC
     ${PROJECT_SOURCE_DIR}/include
     ${LIBAV_INCLUDE_DIRS}
-    ${Boost_INCLUDE_DIRS}
 )
