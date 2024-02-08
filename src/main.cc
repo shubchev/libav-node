@@ -21,6 +21,7 @@
 #include <sstream>
 #include <thread>
 #include <codecvt>
+#include <locale>
 #include "ipc-pipe.h"
 
 std::string to_string(const std::wstring &str) {
