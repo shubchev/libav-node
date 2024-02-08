@@ -13,7 +13,7 @@ if (WIN32)
     set(LIBAV_LIBRARY_DIRS ${LIBAV_ROOT}/lib)
 endif()
 
-add_executable(libav-node
+add_executable(libav-node WIN32
     ${PROJECT_SOURCE_DIR}/include/libav_service.h
     ${PROJECT_SOURCE_DIR}/src/ipc-pipe.cc
     ${PROJECT_SOURCE_DIR}/src/av-enc.cc

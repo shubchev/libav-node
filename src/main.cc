@@ -138,7 +138,7 @@ bool startProccess(const std::string &path, const std::vector<std::string> &para
 
 
 IPCPipe openService(int instanceId) {
-  std::vector<std::string> params = { std::to_string(instanceId) };
+  std::vector<std::string> params = { "avLibService" + std::to_string(instanceId) };
   startProccess(appPath, params);
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
