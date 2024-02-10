@@ -24,6 +24,29 @@
 #include <locale>
 #include "ipc-pipe.h"
 
+#include <CLI/CLI.hpp>
+
+bool dumpLog = false;
+FILE *LOGFILE = stderr;
+
+#include <functional>
+class Scope {
+protected:
+  std::function<void()> func;
+  bool disabled = false;
+public:
+  Scope() = default;
+  Scope(Scope &) = delete;
+  Scope(Scope &&) = delete;
+  template<class ScopeFunc>
+  Scope(ScopeFunc const &_func) : func(_func) { }
+  ~Scope() { if (!disabled) func(); }
+  Scope &operator = (Scope &) = delete;
+  Scope &operator = (Scope &&) = delete;
+  void disable() { disabled = true; }
+  void enable() { disabled = false; }
+};
+
 std::string to_string(const std::wstring &str) {
   std::wstring_convert<std::codecvt_utf8_utf16<wchar_t>, wchar_t> utf16conv;
   return utf16conv.to_bytes(str);
@@ -132,20 +155,19 @@ bool startProccess(const std::string &path, const std::vector<std::string> &para
   if (s != 0) {
     return false;
   }
-
-  printf("PID of child: %jd\n", (intmax_t) child_pid);
   return true;
 #endif
 }
 
 
 
-IPCPipe openService(int instanceId) {
-  std::vector<std::string> params = { "avLibService" + std::to_string(instanceId) };
+IPCPipe openService(const std::string &instanceId) {
+  std::vector<std::string> params = { "-i", instanceId };
+  if (dumpLog) params.push_back("--log");
   startProccess(appPath, params);
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
-  auto pipe = IIPCPipe::open("avLibService" + std::to_string(instanceId));
+  auto pipe = IIPCPipe::open(instanceId);
   std::this_thread::sleep_for(std::chrono::milliseconds(1000));
 
   return pipe;
@@ -153,28 +175,21 @@ IPCPipe openService(int instanceId) {
 
 int closeService(IPCPipe pipe) {
   if (sendAVCmd(pipe, AVCmdType::StopService) != AVCmdResult::Ack) {
-    printf("Failed to send stop command\n");
+    fprintf(LOGFILE, "Failed to send stop command\n");
     return 3;
   }
   return 0;
 }
 
 
-int runEncodeTest(bool &isHEVC) {
-  FILE *dumpFile = fopen("test.mp4", "wb");
-  if (!dumpFile) {
-    printf("Failed to open test.mp4\n");
-    return 3;
-  }
-
-  int width  = 1920;
-  int height = 1080;
+int runEncodeTest(bool &isHEVC, int testWidth, int testHeight, const std::string &testFile) {
+  int width  = testWidth;
+  int height = testHeight;
   int fps = 30;
   int bps = 5000000;
-  auto pipe = openService(1);
+  auto pipe = openService("avLibEncSvc");
   if (!pipe) {
-    printf("Failed to open service\n");
-    fclose(dumpFile);
+    fprintf(LOGFILE, "Failed to open service\n");
     return 3;
   }
 
@@ -189,17 +204,24 @@ int runEncodeTest(bool &isHEVC) {
   cmd.init.bps      = bps;
 
   // try open hevc
-  strcpy(cmd.init.codecName, "hevc_nvenc");
+  if (isHEVC) strcpy(cmd.init.codecName, "hevc_nvenc");
+  else strcpy(cmd.init.codecName, "h264_nvenc");
   if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
     isHEVC = false;
     // try open h264
     strcpy(cmd.init.codecName, "h264_nvenc");
     if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
-      printf("Enc service init failed\n");
+      fprintf(LOGFILE, "Enc service init failed\n");
+      closeService(pipe);
       return 3;
     }
-  } else {
-    isHEVC = true;
+  }
+
+  FILE *dumpFile = fopen(testFile.c_str(), "wb");
+  if (!dumpFile) {
+    fprintf(LOGFILE, "Failed to open test.mp4\n");
+    closeService(pipe);
+    return 3;
   }
 
   for (int i = 0; i < 120; i++) {
@@ -229,19 +251,19 @@ int runEncodeTest(bool &isHEVC) {
     cmd.type = AVCmdType::Encode;
     cmd.size = frameData.size();
     if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
-      printf("Encode command got NACK response\n");
+      fprintf(LOGFILE, "Encode command got NACK response\n");
     }
     if (pipe->write(frameData.data(), frameData.size()) != frameData.size()) {
-      printf("Encode command failed to send frame data\n");
+      fprintf(LOGFILE, "Encode command failed to send frame data\n");
     }
     if (readAVCmdResult(pipe) != AVCmdResult::Ack) {
-      printf("Encoder failed to encode frame %d\n", i);
+      fprintf(LOGFILE, "Encoder failed to encode frame %d\n", i);
     }
 
     // Get encoded data
     if (getPacket(pipe, packetData) == AVCmdResult::Ack) {
       auto endTs = std::chrono::system_clock::now();
-      printf("Time for preprocess: %0.3f s, Time for encode: %0.3f s, Packet size = %d\n",
+      fprintf(LOGFILE, "Time for preprocess: %0.3f s, Time for encode: %0.3f s, Packet size = %d\n",
             std::chrono::duration<float>(startTs1 - startTs).count(),
             std::chrono::duration<float>(endTs - startTs1).count(),
             (int)packetData.size());
@@ -252,13 +274,13 @@ int runEncodeTest(bool &isHEVC) {
 
   {
     if (sendAVCmd(pipe, AVCmdType::Flush) != AVCmdResult::Ack) {
-      printf("Encode flush command got NACK response\n");
+      fprintf(LOGFILE, "Encode flush command got NACK response\n");
     }
 
     while (1) {
       // Get encoded data
       if (getPacket(pipe, packetData) == AVCmdResult::Ack) {
-        printf("Writing flush packet\n");
+        fprintf(LOGFILE, "Writing flush packet\n");
         fwrite(packetData.data(), 1, packetData.size(), dumpFile);
       } else {
         break;
@@ -272,16 +294,16 @@ int runEncodeTest(bool &isHEVC) {
 }
 
 
-int runDecodeTest(bool isHEVC) {
-  FILE *dumpFile = fopen("test.mp4", "rb");
+int runDecodeTest(bool isHEVC, int testWidth, int testHeight, const std::string &testFile) {
+  FILE *dumpFile = fopen(testFile.c_str(), "rb");
   if (!dumpFile) {
-    printf("Failed to open test.mp4\n");
+    fprintf(LOGFILE, "Failed to open test.mp4\n");
     return 3;
   }
 
-  int width  = 1920;
-  int height = 1080;
-  auto pipe = openService(1);
+  int width  = testWidth;
+  int height = testHeight;
+  auto pipe = openService("avLibDecSvc");
   if (!pipe) {
     fclose(dumpFile);
     return 3;
@@ -298,7 +320,7 @@ int runDecodeTest(bool isHEVC) {
   if (isHEVC) strcpy(cmd.init.codecName, "hevc");
   else strcpy(cmd.init.codecName, "h264");
   if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
-    printf("Dec service init failed\n");
+    fprintf(LOGFILE, "Dec service init failed\n");
     return 3;
   }
 
@@ -309,13 +331,13 @@ int runDecodeTest(bool isHEVC) {
       // Send data for decoding
       cmd.type = AVCmdType::Decode;
       if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
-        printf("Decode command got NACK response\n");
+        fprintf(LOGFILE, "Decode command got NACK response\n");
       }
       if (pipe->write(packetData.data(), cmd.size) != cmd.size) {
-        printf("Decode command failed to send packet data\n");
+        fprintf(LOGFILE, "Decode command failed to send packet data\n");
       }
       if (readAVCmdResult(pipe) != AVCmdResult::Ack) {
-        printf("Decoder failed to decode frame %d\n", frameId);
+        fprintf(LOGFILE, "Decoder failed to decode frame %d\n", frameId);
       }
     }
 
@@ -324,7 +346,7 @@ int runDecodeTest(bool isHEVC) {
       if (getFrame(pipe, frameData) != AVCmdResult::Ack) {
         break;
       }
-      printf("Decoded frame %d\n", (int)frameId);
+      fprintf(LOGFILE, "Decoded frame %d\n", (int)frameId);
 
       std::string name = std::string("frame") + std::to_string(frameId++) + ".raw";
       FILE *fp = fopen(name.c_str(), "wb");
@@ -339,7 +361,7 @@ int runDecodeTest(bool isHEVC) {
     if (getFrame(pipe, frameData) != AVCmdResult::Ack) {
       break;
     }
-    printf("Decoded frame %d\n", (int)frameId);
+    fprintf(LOGFILE, "Decoded frame %d\n", (int)frameId);
 
     std::string name = std::string("frame") + std::to_string(frameId++) + ".raw";
     FILE *fp = fopen(name.c_str(), "wb");
@@ -350,49 +372,78 @@ int runDecodeTest(bool isHEVC) {
   return closeService(pipe);
 }
 
-void printUsage() {
-  const char *pn = appPath;
-  auto tmp = pn;
-  while (tmp = strstr(tmp + 1, "\\")) pn = tmp + 1;
-  printf("Insufficient arguments.\n"
-          "  Usage: %s [test | <instanceId>]\n", pn);
-}
-
 #ifdef _WIN32
 int WINAPI wWinMain(HINSTANCE hInstance,
                     HINSTANCE hPrevInstance,
                     PWSTR pCmdLine,
                     int nCmdShow) {
-  std::vector<std::string> argvA;
-  int argc;
-  {
-    auto argvW = CommandLineToArgvW(pCmdLine, &argc);
-    char appCmd[1024];
-    GetModuleFileName(NULL, appCmd, sizeof(appCmd));
-    argvA.push_back(appCmd);
-    for (int i = 0; i < argc; i++) argvA.push_back(to_string(argvW[i]));
-    argc++;
-    LocalFree(argvW);
-  }
 #else
 int main(int argc, char **argv) {
-  std::vector<std::string> argvA;
-  for (int i = 0; i < argc; i++) argvA.push_back(argv[i]);
 #endif
-  appPath = argvA[0].c_str();
-  if (argc < 2) {
-    printUsage();
+  CLI::App app("libAV Node Service");
+
+  bool isHEVC = false;
+  bool testDec = false, testEnc = false;
+  int testWidth = 1920, testHeight = 1080;
+  std::string testFile;
+  std::string instanceId;
+  app.add_option("-i", instanceId, "Service instance. Required unless a test is ran");
+  app.add_flag  ("-d", testDec, "Run a decoder test");
+  app.add_option("-f", testFile, "Test file if decoder test is ran");
+  app.add_flag  ("-e", testEnc, "Run an encoder test");
+  app.add_option("--width", testWidth, "Test width for encoder test. Default 1920")
+    ->check(CLI::PositiveNumber);
+  app.add_option("--height", testHeight, "Test height for encoder test. Default 1080")
+    ->check(CLI::PositiveNumber);
+  app.add_flag("--hevc", isHEVC, "Use HEVC");
+  app.add_flag("--log", dumpLog, "Save logs to a file");
+
+#ifdef _WIN32
+  char modulePath[1024] = { 0 };
+  GetModuleFileName(NULL, modulePath, sizeof(modulePath));
+  appPath = modulePath;
+  try {
+    app.parse(pCmdLine);
+  } catch (const CLI::ParseError &e) {
+    printf(app.help().c_str());
+    return 1;
+  }
+#else
+  appPath = argv[0];
+  try {
+    app.parse(argc, argv);
+  } catch (const CLI::ParseError &e) {
+    printf(app.help().c_str());
+    return 1;
+  }
+#endif
+  if (instanceId.empty() && !testDec && !testEnc) {
+    printf(app.help().c_str());
+    return 1;
+  }
+  if ((testDec || testEnc) && testFile.empty()) {
+    printf("When running test, specify test file name. See --help.\n");
     return 1;
   }
 
-  bool isTest = argvA[1] == "test";
-  if (!isTest) {
+  if (dumpLog) {
+    if (testDec || testEnc) instanceId = "test";
+    std::string fname = "libav-node-" + instanceId + ".log";
+    freopen(fname.c_str(), "a", stderr);
+  }
+
+  Scope exitScope([&]() {
+    if (dumpLog) {
+      fclose(stderr);
+    }
+  });
+
+  if (!testDec && !testEnc) {
     AVEnc enc;
     int width, height, fps, bps;
 
-    std::string instanceId = argvA[1];
     if (instanceId.empty()) {
-      printf("Invalid instance id\n");
+      fprintf(LOGFILE, "Invalid instance id\n");
       return 1;
     }
 
@@ -401,7 +452,7 @@ int main(int argc, char **argv) {
       return 3;
     }
 
-    printf("Starting libav-node service, session id %s\n", instanceId.c_str());
+    fprintf(LOGFILE, "Starting libav-node service, session id %s\n", instanceId.c_str());
 
     auto encoders = IAVEnc::getEncoders();
     auto decoders = IAVEnc::getDecoders();
@@ -470,6 +521,7 @@ int main(int argc, char **argv) {
           width = height = 0;
           packetData.clear(); packetData.shrink_to_fit();
           frameData.clear(); frameData.shrink_to_fit();
+          fprintf(LOGFILE, "Closing encoder/decoder\n");
           sendAVCmdResult(pipe, AVCmdResult::Ack);
           break;
         }
@@ -542,6 +594,7 @@ int main(int argc, char **argv) {
         case AVCmdType::StopService: {
           stopService = true;
           enc = nullptr;
+          fprintf(LOGFILE, "Stopping service\n");
           sendAVCmdResult(pipe, AVCmdResult::Ack);
           break;
         }
@@ -556,16 +609,24 @@ int main(int argc, char **argv) {
       }
     }
     pipe = nullptr;
+    fprintf(LOGFILE, "Exit service.\n");
   } else {
-    bool isHEVC = false;
-    printf("Starting encode test\n");
-    int ret = runEncodeTest(isHEVC);
-    if (ret) return ret;
+    if (testEnc) {
+      fprintf(LOGFILE, "Starting encode test\n");
+      int ret = runEncodeTest(isHEVC, testWidth, testHeight, testFile);
+      if (ret) return ret;
 
-    std::this_thread::sleep_for(std::chrono::milliseconds(4000));
-    printf("Starting decode test\n");
-    return runDecodeTest(isHEVC);
+      if (testDec) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+      }
+    }
+
+    if (testDec) {
+      fprintf(LOGFILE, "Starting decode test\n");
+      int ret = runDecodeTest(isHEVC, testWidth, testHeight, testFile);
+      if (ret) return ret;
+    }
   }
-  printf("Exit service.\n");
+
   return 0;
 }

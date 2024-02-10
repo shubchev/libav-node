@@ -26,6 +26,7 @@ public:
 InitAV initAV;
 #endif
 
+extern FILE *LOGFILE;
 
 class AVEncoder : public IAVEnc {
 public:
@@ -49,13 +50,13 @@ public:
 
     auto codec = avcodec_find_encoder_by_name(name.c_str());
     if (!codec) {
-      fprintf(stderr, "Could not find video codec: %s\n", name.c_str());
+      fprintf(LOGFILE, "Could not find video codec: %s\n", name.c_str());
       return false;
     }
 
     ctx = avcodec_alloc_context3(codec);
     if (!ctx) {
-      fprintf(stderr, "Could not allocate video encoder context\n");
+      fprintf(LOGFILE, "Could not allocate video encoder context\n");
       return false;
     }
 
@@ -87,7 +88,7 @@ public:
     char errstr[256];
     ret = avcodec_open2(ctx, codec, NULL);
     if (ret < 0) {
-      fprintf(stderr, "Could not open codec '%s': %s\n", codec->name, av_make_error_string(errstr, sizeof(errstr), ret));
+      fprintf(LOGFILE, "Could not open codec '%s': %s\n", codec->name, av_make_error_string(errstr, sizeof(errstr), ret));
       if (ctx) avcodec_free_context(&ctx);
       ctx = nullptr;
       return false;
@@ -95,14 +96,14 @@ public:
 
     pkt = av_packet_alloc();
     if (!pkt) {
-      fprintf(stderr, "Could not allocate video packet\n");
+      fprintf(LOGFILE, "Could not allocate video packet\n");
       deinit();
       return false;
     }
 
     frame = av_frame_alloc();
     if (!frame) {
-      fprintf(stderr, "Could not allocate video frame\n");
+      fprintf(LOGFILE, "Could not allocate video frame\n");
       deinit();
       return false;
     }
@@ -112,13 +113,13 @@ public:
 
     ret = av_frame_get_buffer(frame, 0);
     if (ret < 0) {
-      fprintf(stderr, "Could not allocate the video frame data\n");
+      fprintf(LOGFILE, "Could not allocate the video frame data\n");
       deinit();
       return false;
     }
 
     codecName = name;
-    printf("Encoder opened: %s\n", codec->name);
+    fprintf(LOGFILE, "Encoder opened: %s\n", codec->name);
 
     return true;
   }
@@ -154,7 +155,7 @@ public:
       ret = avcodec_send_frame(ctx, frame);
       if (ret < 0) {
         frameData->erase(frameData->begin(), frameData->begin() + i - 1);
-        fprintf(stderr, "Error sending a frame for encoding\n");
+        fprintf(LOGFILE, "Error sending a frame for encoding\n");
         return false;
       }
     }
@@ -162,7 +163,7 @@ public:
     if (!frameData) {
       ret = avcodec_send_frame(ctx, 0);
       if (ret < 0) {
-        fprintf(stderr, "Error sending a frame for encoding\n");
+        fprintf(LOGFILE, "Error sending a frame for encoding\n");
         return false;
       }
     } else {
@@ -175,7 +176,7 @@ public:
         if (ret == AVERROR_EOF) return (frameData) ? false : true;
         continue;
       } else if (ret < 0) {
-        fprintf(stderr, "Error during encoding\n");
+        fprintf(LOGFILE, "Error during encoding\n");
         return false;
       }
 

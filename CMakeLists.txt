@@ -4,7 +4,6 @@ project(libav-node)
 
 set(CMAKE_CXX_STANDARD 20)
 
-
 if (WIN32)
     set(LIBAV_ROOT $ENV{LIBAV_ROOT})
     set(LIBAV_INCLUDE_DIRS ${LIBAV_ROOT}/include)
@@ -41,5 +40,6 @@ target_link_libraries (libav-node PRIVATE
 # Include Paths
 target_include_directories (libav-node PUBLIC
     ${PROJECT_SOURCE_DIR}/include
+    ${PROJECT_SOURCE_DIR}/external/CLI11/include
     ${LIBAV_INCLUDE_DIRS}
 )
