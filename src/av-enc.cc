@@ -81,8 +81,10 @@ public:
 
     ctx->opaque = this;
 
-    if (codec->id == AV_CODEC_ID_H264) {
-      av_opt_set(ctx->priv_data, "preset", "slow", 0);
+    if (codec->id == AV_CODEC_ID_H264 || codec->id == AV_CODEC_ID_H265) {
+      av_opt_set(ctx->priv_data, "preset", "medium", 0);
+      ctx->has_b_frames = 0;
+      ctx->max_b_frames = 0;
     }
 
     char errstr[256];
