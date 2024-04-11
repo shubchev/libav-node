@@ -22,6 +22,8 @@ enum class AVCmdType : uint8_t {
   GetPacket,
   GetFrame,
 
+  KeepAlive,
+
   StopService,
 };
 

@@ -10,6 +10,8 @@ class IIPCPipe {
 public:
   virtual ~IIPCPipe() {}
 
+  virtual bool isOpen() const = 0;
+
   virtual size_t write(const void *data, size_t size) = 0;
   virtual size_t read(void *data, size_t size, int timeoutMs = -1) = 0;
 

@@ -4,6 +4,7 @@
 #include <condition_variable>
 #include <filesystem>
 #include <fstream>
+#include <thread>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -29,11 +30,18 @@ public:
   IPCPipeImpl() {
   }
   ~IPCPipeImpl() {
+    close();
+  }
+
+  void close() {
 #ifdef _WIN32
     if (hPipe != INVALID_HANDLE_VALUE) CloseHandle(hPipe);
+    hPipe = INVALID_HANDLE_VALUE;
 #else
-    if (hPipe >= 0) close(hPipe);
-    if (hClient >= 0) close(hClient);
+    if (hPipe >= 0) ::close(hPipe);
+    hPipe = -1;
+    if (hClient >= 0) ::close(hClient);
+    hClient = -1;
     if (pipeName.length()) ::unlink(pipeName.c_str());
 #endif
   }
@@ -51,8 +59,8 @@ public:
     DWORD bytesWritten = 0;
     while (totalBytes < size && retry > 0) {
       if (!WriteFile(hPipe, &ptr[totalBytes], size - totalBytes, &bytesWritten, NULL)) {
-        retry--;
-        fprintf(LOGFILE, "Writing pipe failed with error %d\n", errno);
+        close();
+        return 0;
       } else {
         totalBytes += bytesWritten;
       }
@@ -62,8 +70,8 @@ public:
     while (totalBytes < size && retry > 0) {
       ret = ::write(hClient, &ptr[totalBytes], size - totalBytes);
       if (ret <= 0) {
-        retry--;
-        fprintf(LOGFILE, "Writing pipe failed with error %d\n", errno);
+        close();
+        return 0;
       } else {
         totalBytes += ret;
       }
@@ -89,7 +97,8 @@ public:
         if (timeoutMs >= 0 && std::chrono::duration<double>(end - start).count() > 0.001 * timeoutMs) {
           return totalBytes;
         } else {
-          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+          close();
+          return 0;
         }
       } else {
         totalBytes += bytesRead;
@@ -104,14 +113,15 @@ public:
       fds.revents = 0;
       ret = ::poll(&fds, 1, timeoutMs);
       if (ret < 0) {
-        fprintf(LOGFILE, "Polling pipe failed with error %d\n", errno);
+        close();
+        return 0;
       } else if (ret == 0) {
         return totalBytes;
       } else if (fds.revents & POLLIN) {
         ret = ::read(hClient, &ptr[totalBytes], size - totalBytes);
         if (ret <= 0) {
-          fprintf(LOGFILE, "Reading pipe failed with error %d\n", errno);
-          return totalBytes;
+          close();
+          return 0;
         }
         totalBytes += ret;
       }
@@ -120,6 +130,13 @@ public:
     return totalBytes;
   }
 
+  bool isOpen() const {
+#ifdef _WIN32
+    return INVALID_HANDLE_VALUE != hPipe;
+#else
+    return -1 != hPipe && -1 != hClient;
+#endif
+  }
 
 #ifdef _WIN32
   HANDLE hPipe = INVALID_HANDLE_VALUE;

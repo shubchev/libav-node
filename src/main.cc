@@ -470,9 +470,15 @@ int main(int argc, char **argv) {
       if (!readAVCmd(pipe, &cmd, 200)) {
         continue;
       }
+      if (!pipe->isOpen()) {
+        break;
+      }
       lastKeepAlive = std::chrono::system_clock::now();
 
       switch (cmd.type) {
+        case AVCmdType::KeepAlive: {
+          break;
+        }
         case AVCmdType::GetEncoderCount: {
           sendAVCmdResult(pipe, AVCmdResult::Ack, encoders.size());
           break;
