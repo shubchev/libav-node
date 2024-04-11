@@ -109,7 +109,7 @@ public:
         return totalBytes;
       } else if (fds.revents & POLLIN) {
         ret = ::read(hClient, &ptr[totalBytes], size - totalBytes);
-        if (ret < 0) {
+        if (ret <= 0) {
           fprintf(LOGFILE, "Reading pipe failed with error %d\n", errno);
           return totalBytes;
         }
