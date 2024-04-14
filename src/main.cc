@@ -467,11 +467,11 @@ int main(int argc, char **argv) {
       if (keepAliveDur.count() > 10) break;
 
       AVCmd cmd;
-      if (!readAVCmd(pipe, &cmd, 200)) {
-        continue;
-      }
       if (!pipe->isOpen()) {
         break;
+      }
+      if (!readAVCmd(pipe, &cmd, 200)) {
+        continue;
       }
       lastKeepAlive = std::chrono::system_clock::now();
 

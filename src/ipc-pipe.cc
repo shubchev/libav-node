@@ -97,7 +97,10 @@ public:
         if (timeoutMs >= 0 && std::chrono::duration<double>(end - start).count() > 0.001 * timeoutMs) {
           return totalBytes;
         } else {
-          close();
+          auto err = GetLastError();
+          if (err != ERROR_SUCCESS && err != ERROR_PIPE_LISTENING) {
+            close();
+          }
           return 0;
         }
       } else {
