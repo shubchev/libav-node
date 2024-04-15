@@ -14,6 +14,10 @@
   #include <wait.h>
 #endif
 
+#include <plog/Log.h>
+#include <plog/Initializers/RollingFileInitializer.h>
+#include <plog/Initializers/ConsoleInitializer.h>
+#include <plog/Formatters/TxtFormatter.h>
 #include "libav_service.h"
 #include "av.h"
 #include <chrono>
@@ -22,12 +26,12 @@
 #include <thread>
 #include <codecvt>
 #include <locale>
+#include <inttypes.h>
 #include "ipc-pipe.h"
 
 #include <CLI/CLI.hpp>
 
 bool dumpLog = false;
-FILE *LOGFILE = stderr;
 
 #include <functional>
 class Scope {
@@ -175,7 +179,7 @@ IPCPipe openService(const std::string &instanceId) {
 
 int closeService(IPCPipe pipe) {
   if (sendAVCmd(pipe, AVCmdType::StopService) != AVCmdResult::Ack) {
-    fprintf(LOGFILE, "Failed to send stop command\n");
+    LOG_ERROR << "[ENC] Failed to send stop command";
     return 3;
   }
   return 0;
@@ -189,7 +193,7 @@ int runEncodeTest(bool &isHEVC, int testWidth, int testHeight, const std::string
   int bps = 5000000;
   auto pipe = openService("avLibEncSvc");
   if (!pipe) {
-    fprintf(LOGFILE, "Failed to open service\n");
+    LOG_ERROR << "[ENC] Failed to open service";
     return 3;
   }
 
@@ -211,7 +215,7 @@ int runEncodeTest(bool &isHEVC, int testWidth, int testHeight, const std::string
     // try open h264
     strcpy(cmd.init.codecName, "h264_nvenc");
     if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
-      fprintf(LOGFILE, "Enc service init failed\n");
+      LOG_ERROR << "[ENC] Enc service init failed";
       closeService(pipe);
       return 3;
     }
@@ -219,7 +223,7 @@ int runEncodeTest(bool &isHEVC, int testWidth, int testHeight, const std::string
 
   FILE *dumpFile = fopen(testFile.c_str(), "wb");
   if (!dumpFile) {
-    fprintf(LOGFILE, "Failed to open test.mp4\n");
+    LOG_ERROR << "[ENC] Failed to open test.mp4";
     closeService(pipe);
     return 3;
   }
@@ -251,22 +255,21 @@ int runEncodeTest(bool &isHEVC, int testWidth, int testHeight, const std::string
     cmd.type = AVCmdType::Encode;
     cmd.size = frameData.size();
     if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
-      fprintf(LOGFILE, "Encode command got NACK response\n");
+      LOG_ERROR << "[ENC] Encode command got NACK response";
     }
     if (pipe->write(frameData.data(), frameData.size()) != frameData.size()) {
-      fprintf(LOGFILE, "Encode command failed to send frame data\n");
+      LOG_ERROR << "[ENC] Encode command failed to send frame data";
     }
     if (readAVCmdResult(pipe) != AVCmdResult::Ack) {
-      fprintf(LOGFILE, "Encoder failed to encode frame %d\n", i);
+      LOG_ERROR << "[ENC] Encoder failed to encode frame " << i;
     }
 
     // Get encoded data
     if (getPacket(pipe, packetData) == AVCmdResult::Ack) {
       auto endTs = std::chrono::system_clock::now();
-      fprintf(LOGFILE, "Time for preprocess: %0.3f s, Time for encode: %0.3f s, Packet size = %d\n",
-            std::chrono::duration<float>(startTs1 - startTs).count(),
-            std::chrono::duration<float>(endTs - startTs1).count(),
-            (int)packetData.size());
+      LOG_INFO << "Time for preprocess: " << std::chrono::duration<float>(startTs1 - startTs).count() <<
+                  ", Time for encode: " << std::chrono::duration<float>(endTs - startTs1).count() << 
+                  ", Packet size = " << packetData.size();
 
       fwrite(packetData.data(), 1, packetData.size(), dumpFile);
     }
@@ -274,13 +277,13 @@ int runEncodeTest(bool &isHEVC, int testWidth, int testHeight, const std::string
 
   {
     if (sendAVCmd(pipe, AVCmdType::Flush) != AVCmdResult::Ack) {
-      fprintf(LOGFILE, "Encode flush command got NACK response\n");
+      LOG_ERROR << "[ENC] Encode flush command got NACK response";
     }
 
     while (1) {
       // Get encoded data
       if (getPacket(pipe, packetData) == AVCmdResult::Ack) {
-        fprintf(LOGFILE, "Writing flush packet\n");
+        LOG_INFO << "Writing flush packet";
         fwrite(packetData.data(), 1, packetData.size(), dumpFile);
       } else {
         break;
@@ -297,7 +300,7 @@ int runEncodeTest(bool &isHEVC, int testWidth, int testHeight, const std::string
 int runDecodeTest(bool isHEVC, int testWidth, int testHeight, const std::string &testFile) {
   FILE *dumpFile = fopen(testFile.c_str(), "rb");
   if (!dumpFile) {
-    fprintf(LOGFILE, "Failed to open test.mp4\n");
+    LOG_ERROR << "[DEC] Failed to open test.mp4";
     return 3;
   }
 
@@ -320,7 +323,7 @@ int runDecodeTest(bool isHEVC, int testWidth, int testHeight, const std::string 
   if (isHEVC) strcpy(cmd.init.codecName, "hevc");
   else strcpy(cmd.init.codecName, "h264");
   if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
-    fprintf(LOGFILE, "Dec service init failed\n");
+    LOG_ERROR << "[DEC] Service init failed";
     return 3;
   }
 
@@ -331,13 +334,13 @@ int runDecodeTest(bool isHEVC, int testWidth, int testHeight, const std::string 
       // Send data for decoding
       cmd.type = AVCmdType::Decode;
       if (sendAVCmd(pipe, cmd) != AVCmdResult::Ack) {
-        fprintf(LOGFILE, "Decode command got NACK response\n");
+        LOG_ERROR << "[DEC] Decode command got NACK response";
       }
       if (pipe->write(packetData.data(), cmd.size) != cmd.size) {
-        fprintf(LOGFILE, "Decode command failed to send packet data\n");
+        LOG_ERROR << "[DEC] Decode command failed to send packet data";
       }
       if (readAVCmdResult(pipe) != AVCmdResult::Ack) {
-        fprintf(LOGFILE, "Decoder failed to decode frame %d\n", frameId);
+        LOG_ERROR << "[DEC] Decoder failed to decode frame " << frameId;
       }
     }
 
@@ -346,7 +349,7 @@ int runDecodeTest(bool isHEVC, int testWidth, int testHeight, const std::string 
       if (getFrame(pipe, frameData) != AVCmdResult::Ack) {
         break;
       }
-      fprintf(LOGFILE, "Decoded frame %d\n", (int)frameId);
+      LOG_INFO << "Decoded frame " << frameId;
 
       std::string name = std::string("frame") + std::to_string(frameId++) + ".raw";
       FILE *fp = fopen(name.c_str(), "wb");
@@ -361,7 +364,7 @@ int runDecodeTest(bool isHEVC, int testWidth, int testHeight, const std::string 
     if (getFrame(pipe, frameData) != AVCmdResult::Ack) {
       break;
     }
-    fprintf(LOGFILE, "Decoded frame %d\n", (int)frameId);
+    LOG_INFO << "Decoded frame " << frameId;
 
     std::string name = std::string("frame") + std::to_string(frameId++) + ".raw";
     FILE *fp = fopen(name.c_str(), "wb");
@@ -429,7 +432,12 @@ int main(int argc, char **argv) {
   if (dumpLog) {
     if (testDec || testEnc) instanceId = "test";
     std::string fname = "libav-node-" + instanceId + ".log";
-    freopen(fname.c_str(), "a", stderr);
+
+    static plog::RollingFileAppender<plog::TxtFormatter> fileAppender(fname.c_str());
+    plog::init(plog::debug, &fileAppender);
+  } else {
+    static plog::ColorConsoleAppender<plog::TxtFormatter> consoleAppender;
+    plog::init(plog::debug, &consoleAppender);
   }
 
   Scope exitScope([&]() {
@@ -443,7 +451,7 @@ int main(int argc, char **argv) {
     int width, height, fps, bps;
 
     if (instanceId.empty()) {
-      fprintf(LOGFILE, "Invalid instance id\n");
+      LOG_ERROR << "[AV] Invalid instance id";
       return 1;
     }
 
@@ -452,7 +460,7 @@ int main(int argc, char **argv) {
       return 3;
     }
 
-    fprintf(LOGFILE, "Starting libav-node service, session id %s\n", instanceId.c_str());
+    LOG_INFO << "[AV] Starting libav-node service, session id " << instanceId;
 
     auto encoders = IAVEnc::getEncoders();
     auto decoders = IAVEnc::getDecoders();
@@ -477,13 +485,17 @@ int main(int argc, char **argv) {
 
       switch (cmd.type) {
         case AVCmdType::KeepAlive: {
+          LOG_DEBUG << "[AV] KeepAlive CMD";
+          sendAVCmdResult(pipe, AVCmdResult::Ack);
           break;
         }
         case AVCmdType::GetEncoderCount: {
+          LOG_INFO << "[AV] GetEncoderCount CMD: " << encoders.size();
           sendAVCmdResult(pipe, AVCmdResult::Ack, encoders.size());
           break;
         }
         case AVCmdType::GetEncoderName: {
+          LOG_INFO << "[AV] GetEncoderName CMD";
           if (cmd.size < encoders.size()) {
             sendAVCmdResult(pipe, AVCmdResult::Ack, encoders[cmd.size].length());
             pipe->write(encoders[cmd.size].c_str(), encoders[cmd.size].length());
@@ -493,10 +505,12 @@ int main(int argc, char **argv) {
           break;
         }
         case AVCmdType::GetDecoderCount: {
+          LOG_INFO << "[AV] GetDecoderCount CMD: " << decoders.size();
           sendAVCmdResult(pipe, AVCmdResult::Ack, decoders.size());
           break;
         }
         case AVCmdType::GetDecoderName: {
+          LOG_INFO << "[AV] GetDecoderName CMD";
           if (cmd.size < decoders.size()) {
             sendAVCmdResult(pipe, AVCmdResult::Ack, decoders[cmd.size].length());
             pipe->write(decoders[cmd.size].c_str(), decoders[cmd.size].length());
@@ -514,11 +528,15 @@ int main(int argc, char **argv) {
             width = cmd.init.width;
             height = cmd.init.height;
             sendAVCmdResult(pipe, AVCmdResult::Ack);
+            LOG_INFO << "[AV] " << ((cmd.type == AVCmdType::OpenDecoder) ? "Decoder" : "Encoder") << " " <<
+                        "created: name=" << codecName << " " << cmd.init.width << "x" << cmd.init.height << " " <<
+                        "fps = " << cmd.init.fps << " bps=" << cmd.init.bps;
           } else {
             width = height = 0;
             packetData.clear(); packetData.shrink_to_fit();
             frameData.clear(); frameData.shrink_to_fit();
             sendAVCmdResult(pipe, AVCmdResult::Nack);
+            LOG_INFO << "[AV] Failed to create " << ((cmd.type == AVCmdType::OpenDecoder) ? "decoder" : "encoder");
           }
           break;
         }
@@ -527,13 +545,15 @@ int main(int argc, char **argv) {
           width = height = 0;
           packetData.clear(); packetData.shrink_to_fit();
           frameData.clear(); frameData.shrink_to_fit();
-          fprintf(LOGFILE, "Closing encoder/decoder\n");
+          LOG_INFO << "[AV] Closing encoder/decoder";
           sendAVCmdResult(pipe, AVCmdResult::Ack);
           break;
         }
         case AVCmdType::Encode: {
+          LOG_DEBUG << "[AV] Encode CMD: ";
           if (!enc || !enc->isEncoder()) {
             sendAVCmdResult(pipe, AVCmdResult::Nack);
+            LOG_ERROR << "[AV]    no encoder opened";
             break;
           } else sendAVCmdResult(pipe, AVCmdResult::Ack);
 
@@ -542,32 +562,40 @@ int main(int argc, char **argv) {
           packetData.clear();
           if (pipe->read(frameData.back().data(), cmd.size) != cmd.size) {
             sendAVCmdResult(pipe, AVCmdResult::Nack);
+            LOG_ERROR << "[AV]    failed to read data";
             break;
           }
 
           bool ret = enc->process(&frameData, &packetData);
+          LOG_DEBUG << "[AV]    process result " << ret;
           if (ret) sendAVCmdResult(pipe, AVCmdResult::Ack);
           else sendAVCmdResult(pipe, AVCmdResult::Nack);
           break;
         }
         case AVCmdType::Decode: {
+          LOG_DEBUG << "[AV] Decode CMD: ";
           if (!enc || enc->isEncoder()) {
             sendAVCmdResult(pipe, AVCmdResult::Nack);
+            LOG_ERROR << "[AV]    no decoder opened";
             break;
           } else sendAVCmdResult(pipe, AVCmdResult::Ack);
 
           packetData.resize(cmd.size);
           if (pipe->read(packetData.data(), cmd.size) != cmd.size) {
             sendAVCmdResult(pipe, AVCmdResult::Nack);
+            LOG_ERROR << "[AV]    failed to read data";
             break;
           }
 
           bool ret = enc->process(&frameData, &packetData);
+          LOG_DEBUG << "[AV]    process result " << ret;
           if (ret) sendAVCmdResult(pipe, AVCmdResult::Ack);
           else sendAVCmdResult(pipe, AVCmdResult::Nack);
           break;
         }
         case AVCmdType::GetPacket: {
+          LOG_DEBUG << "[AV] GetPacket CMD: size = " << packetData.size();
+
           if (packetData.size()) {
             sendAVCmdResult(pipe, AVCmdResult::Ack, packetData.size());
             pipe->write(packetData.data(), packetData.size());
@@ -578,6 +606,11 @@ int main(int argc, char **argv) {
           break;
         }
         case AVCmdType::GetFrame: {
+          LOG_DEBUG << "[AV] GetFrame CMD";
+          for (auto &f : frameData) {
+            LOG_DEBUG << "[AV]    frame size " << f.size();
+          }
+
           if (frameData.size()) {
             auto &data = frameData.front();
             sendAVCmdResult(pipe, AVCmdResult::Ack, data.size());
@@ -589,6 +622,7 @@ int main(int argc, char **argv) {
           break;
         }
         case AVCmdType::Flush: {
+          LOG_DEBUG << "[AV] Flush CMD";
           bool ret = false;
           if (enc->isEncoder()) ret = enc->process(nullptr, &packetData);
           else ret = enc->process(&frameData, nullptr);
@@ -600,7 +634,7 @@ int main(int argc, char **argv) {
         case AVCmdType::StopService: {
           stopService = true;
           enc = nullptr;
-          fprintf(LOGFILE, "Stopping service\n");
+          LOG_INFO << "[AV] Stopping service";
           sendAVCmdResult(pipe, AVCmdResult::Ack);
           break;
         }
@@ -615,10 +649,10 @@ int main(int argc, char **argv) {
       }
     }
     pipe = nullptr;
-    fprintf(LOGFILE, "Exit service.\n");
+    LOG_DEBUG << "[AV] Exit service.";
   } else {
     if (testEnc) {
-      fprintf(LOGFILE, "Starting encode test\n");
+      LOG_INFO << "[AVTest] Starting encode test";
       int ret = runEncodeTest(isHEVC, testWidth, testHeight, testFile);
       if (ret) return ret;
 
@@ -628,7 +662,7 @@ int main(int argc, char **argv) {
     }
 
     if (testDec) {
-      fprintf(LOGFILE, "Starting decode test\n");
+      LOG_INFO << "[AVTest] Starting decode test";
       int ret = runDecodeTest(isHEVC, testWidth, testHeight, testFile);
       if (ret) return ret;
     }

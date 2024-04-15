@@ -1,3 +1,4 @@
+#include <plog/Log.h>
 #include "ipc-pipe.h"
 
 #include <chrono>
@@ -164,7 +165,7 @@ IPCPipe IIPCPipe::create(const std::string &name, size_t bufferStorageSize) try 
                                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
                                1, bufferStorageSize, bufferStorageSize, 0, NULL);
   if (ipc->hPipe == INVALID_HANDLE_VALUE) {
-    fprintf(LOGFILE, "create: Could not create pipe. Error %d\n", errno);
+    LOG_ERROR << "[IPC] Could not create pipe. Error " << errno;
     return nullptr;
   }
 #else
@@ -172,7 +173,7 @@ IPCPipe IIPCPipe::create(const std::string &name, size_t bufferStorageSize) try 
   ::unlink(ipc->pipeName.c_str());
   ipc->hPipe = socket(AF_UNIX, SOCK_STREAM, 0);
   if (ipc->hPipe == -1) {
-    fprintf(LOGFILE, "create: Could not create pipe. Error %d\n", errno);
+    LOG_ERROR << "[IPC] Could not create pipe. Error " << errno;
     return nullptr;
   }
 
@@ -183,26 +184,26 @@ IPCPipe IIPCPipe::create(const std::string &name, size_t bufferStorageSize) try 
 
   int ret = bind(ipc->hPipe, (const struct sockaddr *)&addr, sizeof(addr));
   if (ret == -1) {
-    fprintf(LOGFILE, "create: Could not bind pipe. Error %d\n", errno);
+    LOG_ERROR << "[IPC] Could not bind pipe. Error " << errno;
     return nullptr;
   }
 
   ret = listen(ipc->hPipe, 1);
   if (ret == -1) {
-    fprintf(LOGFILE, "create: Could not listen pipe. Error %d\n", errno);
+    LOG_ERROR << "[IPC] Could not listen pipe. Error " << errno;
     return nullptr;
   }
 
   ipc->hClient = accept(ipc->hPipe, NULL, NULL);
   if (ipc->hClient == -1) {
-    fprintf(LOGFILE, "create: Failed to accept pipe client. Error %d\n", errno);
+    LOG_ERROR << "[IPC] Failed to accept pipe client. Error " << errno;
     return nullptr;
   }
 #endif
 
   return ipc;
 } catch (std::exception &e) {
-  fprintf(LOGFILE, "IPC-PIPE: Create error: %s\n", e.what());
+  LOG_ERROR << "[IPC] Create error: " << e.what();
   return nullptr;
 }
 
@@ -221,14 +222,14 @@ IPCPipe IIPCPipe::open(const std::string &name) try {
     }
 
     if (GetLastError() != ERROR_PIPE_BUSY) {
-      fprintf(LOGFILE, "open: Could not open pipe. Error %d\n", errno);
+      LOG_ERROR << "[IPC] Could not open pipe. Error " << errno;
       return nullptr;
     }
 
     // All pipe instances are busy, so wait for 20 seconds. 
 
     if (!WaitNamedPipe(name.c_str(), 20000)) {
-      fprintf(LOGFILE, "open: Could not open pipe: 20 second wait timed out.");
+      LOG_ERROR << "[IPC] Could not open pipe: 20 second wait timed out.";
       return nullptr;
     }
   }
@@ -236,7 +237,7 @@ IPCPipe IIPCPipe::open(const std::string &name) try {
   std::string pipeName = "/tmp/" + name;
   ipc->hClient = socket(AF_UNIX, SOCK_STREAM, 0);
   if (ipc->hClient == -1) {
-    fprintf(LOGFILE, "open: Could not create pipe. Error %d\n", errno);
+    LOG_ERROR << "[IPC] Could not create pipe. Error " << errno;
     return nullptr;
   }
 
@@ -247,13 +248,13 @@ IPCPipe IIPCPipe::open(const std::string &name) try {
 
   int ret = connect(ipc->hClient, (const struct sockaddr *)&addr, sizeof(addr));
   if (ret == -1) {
-    fprintf(LOGFILE, "open: Could not connect pipe. Error %d\n", errno);
+    LOG_ERROR << "[IPC] Could not connect pipe. Error " << errno;
     return nullptr;
   }
 #endif
 
   return ipc;
 } catch (std::exception &e) {
-  fprintf(LOGFILE, "IPC-PIPE: Open error: %s\n", e.what());
+  LOG_ERROR << "[IPC] Open error: " << e.what();
   return nullptr;
 }

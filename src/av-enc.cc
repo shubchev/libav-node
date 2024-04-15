@@ -1,3 +1,4 @@
+#include <plog/Log.h>
 #include "av.h"
 #include <string>
 #include <sstream>
@@ -50,13 +51,13 @@ public:
 
     auto codec = avcodec_find_encoder_by_name(name.c_str());
     if (!codec) {
-      fprintf(LOGFILE, "Could not find video codec: %s\n", name.c_str());
+      LOG_ERROR << "[ENC] Could not find video codec: " << name;
       return false;
     }
 
     ctx = avcodec_alloc_context3(codec);
     if (!ctx) {
-      fprintf(LOGFILE, "Could not allocate video encoder context\n");
+      LOG_ERROR << "[ENC] Could not allocate video encoder context";
       return false;
     }
 
@@ -90,7 +91,7 @@ public:
     char errstr[256];
     ret = avcodec_open2(ctx, codec, NULL);
     if (ret < 0) {
-      fprintf(LOGFILE, "Could not open codec '%s': %s\n", codec->name, av_make_error_string(errstr, sizeof(errstr), ret));
+      LOG_ERROR << "[ENC] Could not open codec '" << codec->name << "': " << av_make_error_string(errstr, sizeof(errstr), ret);
       if (ctx) avcodec_free_context(&ctx);
       ctx = nullptr;
       return false;
@@ -98,14 +99,14 @@ public:
 
     pkt = av_packet_alloc();
     if (!pkt) {
-      fprintf(LOGFILE, "Could not allocate video packet\n");
+      LOG_ERROR << "[ENC] Could not allocate video packet";
       deinit();
       return false;
     }
 
     frame = av_frame_alloc();
     if (!frame) {
-      fprintf(LOGFILE, "Could not allocate video frame\n");
+      LOG_ERROR << "[ENC] Could not allocate video frame";
       deinit();
       return false;
     }
@@ -115,13 +116,13 @@ public:
 
     ret = av_frame_get_buffer(frame, 0);
     if (ret < 0) {
-      fprintf(LOGFILE, "Could not allocate the video frame data\n");
+      LOG_ERROR << "[ENC] Could not allocate the video frame data";
       deinit();
       return false;
     }
 
     codecName = name;
-    fprintf(LOGFILE, "Encoder opened: %s\n", codec->name);
+    LOG_INFO << "[ENC] Encoder opened: " << codec->name;
 
     return true;
   }
@@ -157,7 +158,7 @@ public:
       ret = avcodec_send_frame(ctx, frame);
       if (ret < 0) {
         frameData->erase(frameData->begin(), frameData->begin() + i - 1);
-        fprintf(LOGFILE, "Error sending a frame for encoding\n");
+        LOG_ERROR << "[ENC] Error sending a frame for encoding";
         return false;
       }
     }
@@ -165,7 +166,7 @@ public:
     if (!frameData) {
       ret = avcodec_send_frame(ctx, 0);
       if (ret < 0) {
-        fprintf(LOGFILE, "Error sending a frame for encoding\n");
+        LOG_ERROR << "[ENC] Error sending a frame for encoding";
         return false;
       }
     } else {
@@ -178,7 +179,7 @@ public:
         if (ret == AVERROR_EOF) return (frameData) ? false : true;
         continue;
       } else if (ret < 0) {
-        fprintf(LOGFILE, "Error during encoding\n");
+        LOG_ERROR << "[ENC] Error during encoding";
         return false;
       }
 

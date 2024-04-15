@@ -41,5 +41,6 @@ target_link_libraries (libav-node PRIVATE
 target_include_directories (libav-node PUBLIC
     ${PROJECT_SOURCE_DIR}/include
     ${PROJECT_SOURCE_DIR}/external/CLI11/include
+    ${PROJECT_SOURCE_DIR}/external/plog/include
     ${LIBAV_INCLUDE_DIRS}
 )

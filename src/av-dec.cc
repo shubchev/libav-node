@@ -1,3 +1,4 @@
+#include <plog/Log.h>
 #include "av.h"
 #include <string>
 #include <sstream>
@@ -37,26 +38,26 @@ public:
 
     auto codec = avcodec_find_decoder_by_name(name.c_str());
     if (!codec) {
-      fprintf(LOGFILE, "Could not find video codec: %s\n", name.c_str());
+      LOG_ERROR << "[DEC] Could not find video codec: " << name;
       return false;
     }
 
     parser = av_parser_init(codec->id);
     if (!parser) {
-      fprintf(LOGFILE, "parser not found\n");
+      LOG_ERROR << "[DEC] parser not found";
       return false;
     }
 
     ctx = avcodec_alloc_context3(codec);
     if (!ctx) {
-      fprintf(LOGFILE, "Could not allocate video encoder context\n");
+      LOG_ERROR << "[DEC] Could not allocate video encoder context";
       deinit();
       return false;
     }
 
     pkt = av_packet_alloc();
     if (!pkt) {
-      fprintf(LOGFILE, "Could not allocate video packet\n");
+      LOG_ERROR << "[DEC] Could not allocate video packet";
       deinit();
       return false;
     }
@@ -70,19 +71,19 @@ public:
     char errstr[256];
     auto ret = avcodec_open2(ctx, codec, NULL);
     if (ret < 0) {
-      fprintf(LOGFILE, "Could not open codec: %s\n", av_make_error_string(errstr, sizeof(errstr), ret));
+      LOG_ERROR << "[DEC] Could not open codec: " << av_make_error_string(errstr, sizeof(errstr), ret);
       return false;
     }
 
     frame = av_frame_alloc();
     if (!frame) {
-      fprintf(LOGFILE, "Could not allocate video frame\n");
+      LOG_ERROR << "[DEC] Could not allocate video frame";
       deinit();
       return false;
     }
 
     codecName = name;
-    fprintf(LOGFILE, "Decoder opened: %s\n", codec->name);
+    LOG_INFO << "[DEC] Decoder opened: " << codec->name;
 
     return true;
   }
@@ -97,7 +98,7 @@ public:
   bool decode(DoubleArray *frameData) {
     int ret = avcodec_send_packet(ctx, pkt);
     if (ret < 0) {
-      fprintf(LOGFILE, "Error sending a packet for decoding\n");
+      LOG_ERROR << "[DEC] Error sending a packet for decoding";
       return false;
     }
 
@@ -107,7 +108,7 @@ public:
         if (ret == AVERROR_EOF) return false;
         continue;
       } else if (ret < 0) {
-        fprintf(LOGFILE, "Error during decoding\n");
+        LOG_ERROR << "[DEC] Error during decoding";
         return false;
       }
 
@@ -143,7 +144,7 @@ public:
     do {
       int ret = av_parser_parse2(parser, ctx, &pkt->data, &pkt->size, ptr, packetSize, AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
       if (ret < 0) {
-        fprintf(LOGFILE, "Error while parsing\n");
+        LOG_ERROR << "[DEC] Error while parsing";
         return false;
       }
 
