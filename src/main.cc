@@ -435,9 +435,6 @@ int main(int argc, char **argv) {
 
     static plog::RollingFileAppender<plog::TxtFormatter> fileAppender(fname.c_str());
     plog::init(plog::debug, &fileAppender);
-  } else {
-    static plog::ColorConsoleAppender<plog::TxtFormatter> consoleAppender;
-    plog::init(plog::debug, &consoleAppender);
   }
 
   Scope exitScope([&]() {
