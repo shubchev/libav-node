@@ -42,19 +42,33 @@ set(ADDITIONAL_LIBS
 
 if (WIN32)
     set(ADDITIONAL_LIBS
-        ${ADDITIONAL_LIBS}
+        libavcodec
+        libavdevice
+        libavfilter
+        libavformat
+        libavutil
+        libswresample
+        libswscale
         D3D12.lib
-		Bcrypt.lib
-		strmiids.lib
-		DXGI.lib
-		Secur32.lib
+        Bcrypt.lib
+        strmiids.lib
+        DXGI.lib
+        Secur32.lib
         Mfplat.lib
-		Mfuuid.lib)
+        Mfuuid.lib
+    )
 else()
     set(ADDITIONAL_LIBS
-        ${ADDITIONAL_LIBS}
+        avcodec
+        #avdevice
+        #avfilter
+        avformat
+        avutil
+        swresample
+        #swscale
         pthread
-        rt)
+        rt
+    )
 endif()
 
 
