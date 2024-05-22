@@ -35,8 +35,12 @@ public:
     if (width <= 0 || height <= 0 || (width & 2) || (height % 2)) {
       return false;
     }
+    const char *tmpName = name.c_str();
+    if (name.find("sw-") == 0 || name.find("hw-") == 0) {
+      tmpName += 3;
+    }
 
-    auto codec = avcodec_find_decoder_by_name(name.c_str());
+    auto codec = avcodec_find_decoder_by_name(tmpName);
     if (!codec) {
       LOG_ERROR << "[DEC] Could not find video codec: " << name;
       return false;
@@ -82,7 +86,7 @@ public:
       return false;
     }
 
-    codecName = name;
+    codecName = codec->name;
     LOG_INFO << "[DEC] Decoder opened: " << codec->name;
 
     return true;
@@ -165,8 +169,8 @@ public:
 
 };
 
-std::vector<std::string> IAVEnc::getDecoders() {
-  std::vector<std::string> codecs;
+std::set<std::string> IAVEnc::getDecoders() {
+  std::set<std::string> codecs;
   const AVCodec *codec = NULL;
 #ifdef _WIN32
   void *iter = NULL;
@@ -177,12 +181,13 @@ std::vector<std::string> IAVEnc::getDecoders() {
     if (!av_codec_is_decoder(codec)) continue;
     if (strstr(codec->name, "hevc") || strstr(codec->name, "h265") ||
         strstr(codec->name, "avc")  || strstr(codec->name, "h264")) {
-      codecs.push_back(codec->name);
+      std::string type = "sw-";
+      if (avcodec_get_hw_config(codec, 0)) type = "hw-";
+      codecs.insert(type + codec->name);
     }
   }
   return codecs;
 }
-
 
 AVEnc IAVEnc::createDecoder(const std::string &name, int width, int height) {
   auto dec = std::make_shared<AVDecoder>();

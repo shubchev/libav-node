@@ -48,8 +48,12 @@ public:
     if (width <= 0 || height <= 0 || (width & 2) || (height % 2) || bps < 1000000 || fps < 1) {
       return false;
     }
+    const char *tmpName = name.c_str();
+    if (name.find("sw-") == 0 || name.find("hw-") == 0) {
+      tmpName += 3;
+    }
 
-    auto codec = avcodec_find_encoder_by_name(name.c_str());
+    auto codec = avcodec_find_encoder_by_name(tmpName);
     if (!codec) {
       LOG_ERROR << "[ENC] Could not find video codec: " << name;
       return false;
@@ -121,7 +125,7 @@ public:
       return false;
     }
 
-    codecName = name;
+    codecName = codec->name;
     LOG_INFO << "[ENC] Encoder opened: " << codec->name;
 
     return true;
@@ -197,8 +201,8 @@ public:
 
 };
 
-std::vector<std::string> IAVEnc::getEncoders() {
-  std::vector<std::string> codecs;
+std::set<std::string> IAVEnc::getEncoders() {
+  std::set<std::string> codecs;
   const AVCodec *codec = NULL;
 #ifdef _WIN32
   void *iter = NULL;
@@ -208,8 +212,10 @@ std::vector<std::string> IAVEnc::getEncoders() {
 #endif
     if (!av_codec_is_encoder(codec)) continue;
     if (strstr(codec->name, "hevc") || strstr(codec->name, "h265") ||
-        strstr(codec->name, "avc") || strstr(codec->name, "h264")) {
-      codecs.push_back(codec->name);
+        strstr(codec->name, "avc")  || strstr(codec->name, "h264")) {
+      std::string type = "sw-";
+      if (avcodec_get_hw_config(codec, 0)) type = "hw-";
+      codecs.insert(type + codec->name);
     }
   }
   return codecs;

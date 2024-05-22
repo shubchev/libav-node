@@ -1,7 +1,9 @@
 #pragma once
 
 #include <cstdint>
+#include <map>
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -16,8 +18,8 @@ protected:
 public:
   virtual ~IAVEnc() {}
 
-  static std::vector<std::string> getEncoders();
-  static std::vector<std::string> getDecoders();
+  static std::set<std::string> getEncoders();
+  static std::set<std::string> getDecoders();
 
   static AVEnc createEncoder(const std::string &name, int width, int height, int framesPerSecond, int bitsPerSecond);
   static AVEnc createDecoder(const std::string &name, int width, int height);

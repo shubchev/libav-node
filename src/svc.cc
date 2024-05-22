@@ -4,21 +4,35 @@
 #include <thread>
 
 static std::thread svcThread;
-
-static std::condition_variable svcCond;
-static std::mutex svcLock;
-static bool svcExitFlag = false;
-
 static IPCPipe svcPipe;
+static bool svcExitFlag = false;
 
 void svcWorker(const std::string &instanceId) {
   AVEnc enc;
   int width, height, fps, bps;
+  std::set<std::string> encoders, decoders;
+  svcExitFlag = false;
 
-  LOG_INFO << "[AV] Starting libav-node service, session id \"" << instanceId << '"';
+  // init service
+  {
+    LOG_INFO << "[AV] Starting libav-node service, session id \"" << instanceId << '"';
 
-  auto encoders = IAVEnc::getEncoders();
-  auto decoders = IAVEnc::getDecoders();
+    svcPipe = IIPCPipe::create(instanceId, PIPE_BUFFER_SIZE);
+    if (!svcPipe) {
+      LOG_ERROR << "[AV] Failed to create pipe";
+      svcExitFlag = true;
+      return;
+    }
+
+    encoders = IAVEnc::getEncoders();
+    decoders = IAVEnc::getDecoders();
+
+    if (encoders.empty() && decoders.empty()) {
+      LOG_ERROR << "[AV] No encoders and decoders available";
+      svcExitFlag = true;
+      return;
+    }
+  }
 
   LOG_INFO << "Available encoders:";
   for (auto &e : encoders) LOG_INFO << "  Name: " << e;
@@ -60,9 +74,11 @@ void svcWorker(const std::string &instanceId) {
       }
       case AVCmdType::GetEncoderName: {
         LOG_INFO << "[AV] GetEncoderName CMD";
-        if (cmd.size < encoders.size()) {
-          sendAVCmdResult(svcPipe, AVCmdResult::Ack, encoders[cmd.size].length());
-          svcPipe->write(encoders[cmd.size].c_str(), encoders[cmd.size].length());
+        auto it = encoders.begin();
+        for (size_t i = 0; it != encoders.end() && i < cmd.size; i++) it++;
+        if (it != encoders.end()) {
+          sendAVCmdResult(svcPipe, AVCmdResult::Ack, it->length());
+          svcPipe->write(it->c_str(), it->length());
         } else {
           sendAVCmdResult(svcPipe, AVCmdResult::Nack);
         }
@@ -75,9 +91,11 @@ void svcWorker(const std::string &instanceId) {
       }
       case AVCmdType::GetDecoderName: {
         LOG_INFO << "[AV] GetDecoderName CMD";
-        if (cmd.size < decoders.size()) {
-          sendAVCmdResult(svcPipe, AVCmdResult::Ack, decoders[cmd.size].length());
-          svcPipe->write(decoders[cmd.size].c_str(), decoders[cmd.size].length());
+        auto it = decoders.begin();
+        for (size_t i = 0; it != decoders.end() && i < cmd.size; i++) it++;
+        if (it != decoders.end()) {
+          sendAVCmdResult(svcPipe, AVCmdResult::Ack, it->length());
+          svcPipe->write(it->c_str(), it->length());
         } else {
           sendAVCmdResult(svcPipe, AVCmdResult::Nack);
         }
@@ -87,28 +105,30 @@ void svcWorker(const std::string &instanceId) {
       case AVCmdType::OpenDecoder: {
         std::string codecName = cmd.init.codecName;
 
-        std::vector<std::string> *coderNames;
+        std::set<std::string> *coderNames;
         if (cmd.type == AVCmdType::OpenDecoder) coderNames = &decoders;
         else coderNames = &encoders;
 
+        bool exactMatch = false;
         std::vector<std::string> matches;
         for (auto &c : *coderNames) {
+          if (c == codecName) { exactMatch = true; break; }
           if (c.find(codecName) != std::string::npos) {
             matches.push_back(c);
             LOG_INFO << "match: " << c;
           }
         }
 
-        std::sort(matches.begin(), matches.end(),
-          [] (const std::string &a, const std::string &b) {
-            return a.compare(b);
-          });
-
-        for (auto &name : matches) {
-          LOG_INFO << "match test: " << name;
-          if (cmd.type == AVCmdType::OpenDecoder) enc = IAVEnc::createDecoder(name, cmd.init.width, cmd.init.height);
-          else enc = IAVEnc::createEncoder(name, cmd.init.width, cmd.init.height, cmd.init.fps, cmd.init.bps);
-          if (enc) break;
+        if (!exactMatch) {
+           for (auto &name : matches) {
+            LOG_INFO << "match test: " << name;
+            if (cmd.type == AVCmdType::OpenDecoder) enc = IAVEnc::createDecoder(name, cmd.init.width, cmd.init.height);
+            else enc = IAVEnc::createEncoder(name, cmd.init.width, cmd.init.height, cmd.init.fps, cmd.init.bps);
+            if (enc) break;
+          }
+        } else {
+          if (cmd.type == AVCmdType::OpenDecoder) enc = IAVEnc::createDecoder(codecName, cmd.init.width, cmd.init.height);
+          else enc = IAVEnc::createEncoder(codecName, cmd.init.width, cmd.init.height, cmd.init.fps, cmd.init.bps);
         }
 
         if (enc) {
@@ -236,12 +256,9 @@ void svcWorker(const std::string &instanceId) {
     }
   }
 
-  {
-    std::lock_guard<std::mutex> lg(svcLock);
-    svcPipe = nullptr;
-    svcExitFlag = true;
-    svcCond.notify_all();
-  }
+  svcPipe = nullptr;
+  svcExitFlag = true;
+
   LOG_DEBUG << "[AV] Exit service.";
 }
 
@@ -252,15 +269,9 @@ bool startService(const std::string &instanceId) {
     return false;
   }
 
-  svcPipe = IIPCPipe::create(instanceId, PIPE_BUFFER_SIZE);
-  if (!svcPipe) {
-    LOG_ERROR << "[AV] Failed to create pipe";
-    return false;
-  }
-
   svcThread = std::thread(svcWorker, instanceId);
-
-  return true;
+  std::this_thread::sleep_for(std::chrono::milliseconds(500));
+  return !svcExitFlag;
 }
 
 void waitServiceToExit() {
